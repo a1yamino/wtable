@@ -1,0 +1,375 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"wtable/internal/agent"
+	"wtable/internal/config"
+	"wtable/internal/model"
+	"wtable/internal/terminal"
+)
+
+func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, error) {
+	if args.Backend == "" {
+		args.Backend = "pty"
+	}
+	if args.Backend != "pty" && args.Backend != "acp" {
+		return model.Pane{}, errors.New("backend 必须为 pty 或 acp")
+	}
+	if len(args.Command) == 0 {
+		if args.Backend == "acp" {
+			return model.Pane{}, errors.New("ACP 需要明确的启动命令")
+		}
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/zsh"
+		}
+		args.Command = []string{shell}
+	}
+	if args.Cwd == "" {
+		return model.Pane{}, errors.New("需要工作目录")
+	}
+	cwd, err := filepath.Abs(args.Cwd)
+	if err != nil {
+		return model.Pane{}, err
+	}
+	info, err := os.Stat(cwd)
+	if err != nil {
+		return model.Pane{}, err
+	}
+	if !info.IsDir() {
+		return model.Pane{}, errors.New("cwd 不是目录")
+	}
+	if len(args.Name) > 80 || strings.ContainsAny(args.Name, "\n\r\x00") {
+		return model.Pane{}, errors.New("pane 名称过长或包含控制字符")
+	}
+	if args.Cols == 0 {
+		args.Cols = 80
+	}
+	if args.Rows == 0 {
+		args.Rows = 24
+	}
+	args.Cols = max(2, min(240, args.Cols))
+	args.Rows = max(1, min(100, args.Rows))
+	token, err := config.Secret()
+	if err != nil {
+		return model.Pane{}, err
+	}
+	id := restartID
+	if id == "" {
+		id = newID("p-")
+	}
+	if args.Name == "" {
+		args.Name = id
+	}
+	runCtx, runCancel := context.WithCancel(s.ctx)
+	s.mu.Lock()
+	if p := s.paneLocked(args.Name); p != nil && p.ID != restartID {
+		s.mu.Unlock()
+		runCancel()
+		return model.Pane{}, errors.New("pane 名称已存在")
+	}
+	var sessionID string
+	if restartID != "" {
+		p := s.paneLocked(restartID)
+		if p == nil {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("pane 不存在")
+		}
+		if p.State == "running" || p.State == "starting" || p.State == "stopping" {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("pane 仍在运行，请先停止")
+		}
+		sessionID = p.SessionID
+		p.State = "starting"
+		p.TurnState = "idle"
+		p.Error = ""
+		p.ExitCode = nil
+		delete(s.agents, id)
+		delete(s.terminals, id)
+	} else {
+		if len(s.state.Panes) >= 32 {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("MVP 最多保留 32 个 pane")
+		}
+		s.state.Panes = append(s.state.Panes, model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, State: "starting", TurnState: "idle", CreatedAt: time.Now()})
+	}
+	runID := hash(token)
+	s.peerTokens[id] = runID
+	s.runs[id] = runID
+	s.paneCancels[id] = runCancel
+	if err = s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		runCancel()
+		return model.Pane{}, err
+	}
+	s.mu.Unlock()
+	env, err := s.childEnv(id, token)
+	if err != nil {
+		s.failedStart(id, runID, err)
+		return model.Pane{}, err
+	}
+	if args.Backend == "pty" {
+		t, err := terminal.Start(runCtx, terminal.Config{Command: args.Command, Cwd: cwd, Env: env, Cols: args.Cols, Rows: args.Rows, OnChange: func() { s.revision.Add(1) }, OnExit: func(code int, exitErr error) { s.paneExited(id, runID, code, exitErr) }})
+		if err != nil {
+			s.failedStart(id, runID, err)
+			return model.Pane{}, err
+		}
+		s.mu.Lock()
+		if s.runs[id] != runID {
+			s.mu.Unlock()
+			t.Close()
+			return model.Pane{}, errors.New("pane 启动已被替换")
+		}
+		s.terminals[id] = t
+		p := s.paneLocked(id)
+		cancelled := runCtx.Err() != nil || p.State == "stopping"
+		if p.State == "starting" && !cancelled {
+			p.State = "running"
+		}
+		err = s.saveLocked()
+		copy := clonePane(*p)
+		s.mu.Unlock()
+		if cancelled {
+			t.Close()
+			return copy, errors.New("pane 启动已取消")
+		}
+		return copy, err
+	}
+	a, err := agent.Start(runCtx, agent.Config{Command: args.Command, Cwd: cwd, Env: env, SessionID: sessionID, OnMessage: func(role, text string) { s.message(id, runID, role, text) }, OnPermission: func(ctx context.Context, p model.Permission) (string, error) { return s.permission(ctx, id, runID, p) }, OnExit: func(err error) { s.paneExited(id, runID, 0, err) }})
+	if err != nil {
+		s.failedStart(id, runID, err)
+		return model.Pane{}, err
+	}
+	s.mu.Lock()
+	if s.runs[id] != runID {
+		s.mu.Unlock()
+		a.Close()
+		return model.Pane{}, errors.New("pane 启动已被替换")
+	}
+	s.agents[id] = a
+	p := s.paneLocked(id)
+	p.SessionID = a.SessionID()
+	cancelled := runCtx.Err() != nil || p.State == "stopping"
+	if p.State == "starting" && !cancelled {
+		p.State = "running"
+	}
+	err = s.saveLocked()
+	copy := clonePane(*p)
+	s.mu.Unlock()
+	if cancelled {
+		a.Close()
+		return copy, errors.New("pane 启动已取消")
+	}
+	if err == nil {
+		go s.runQueue(id)
+	}
+	return copy, err
+}
+
+func (s *Server) childEnv(id, token string) ([]string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	env := make([]string, 0, len(os.Environ())+6)
+	for _, v := range os.Environ() {
+		if !strings.HasPrefix(v, "WTABLE_") {
+			env = append(env, v)
+		}
+	}
+	env = append(env, "WTABLE_CLI="+exe, "WTABLE_HOME="+s.paths.Home, "WTABLE_PANE_ID="+id, "WTABLE_PEER_TOKEN="+token)
+	return env, nil
+}
+
+func (s *Server) failedStart(id, runID string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing || s.runs[id] != runID {
+		return
+	}
+	if p := s.paneLocked(id); p != nil {
+		p.State = "failed"
+		p.Error = err.Error()
+	}
+	delete(s.peerTokens, id)
+	delete(s.runs, id)
+	if cancel := s.paneCancels[id]; cancel != nil {
+		cancel()
+		delete(s.paneCancels, id)
+	}
+	s.saveLocked()
+}
+
+func (s *Server) paneExited(id, runID string, code int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing || s.runs[id] != runID {
+		return
+	}
+	if p := s.paneLocked(id); p != nil {
+		p.ExitCode = &code
+		p.State = "exited"
+		if code != 0 || err != nil {
+			p.State = "failed"
+		}
+		if err != nil {
+			p.Error = err.Error()
+		}
+		if p.TurnState == "running" || p.TurnState == "waiting-permission" {
+			p.TurnState = "unknown"
+		}
+	}
+	delete(s.peerTokens, id)
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if t.To == id && (t.State == "running" || t.State == "cancelling") {
+			t.State = "unknown"
+			t.Result = "agent 进程退出，执行结果未确认"
+			t.UpdatedAt = time.Now()
+		}
+	}
+	s.saveLocked()
+}
+
+func (s *Server) stop(ref string) error {
+	s.mu.Lock()
+	p := s.paneLocked(ref)
+	if p == nil {
+		s.mu.Unlock()
+		return errors.New("pane 不存在")
+	}
+	id := p.ID
+	t := s.terminals[id]
+	a := s.agents[id]
+	cancel := s.paneCancels[id]
+	if p.State == "starting" || p.State == "running" {
+		p.State = "stopping"
+	}
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if t != nil {
+		return t.Close()
+	}
+	if a != nil {
+		return a.Close()
+	}
+	return nil
+}
+
+func (s *Server) message(id, runID, role, text string) {
+	if text == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing || s.runs[id] != runID {
+		return
+	}
+	p := s.paneLocked(id)
+	if p == nil {
+		return
+	}
+	if n := len(p.Messages); n > 0 && p.Messages[n-1].Role == role {
+		p.Messages[n-1].Text += text
+	} else {
+		p.Messages = append(p.Messages, model.Message{Role: role, Text: text, At: time.Now()})
+	}
+	// Chat is a bounded presentation log; complete task results live separately.
+	total := 0
+	for i := len(p.Messages) - 1; i >= 0; i-- {
+		m := &p.Messages[i]
+		if len(m.Text) > 65536 {
+			m.Text = string([]rune(m.Text)[max(0, len([]rune(m.Text))-16000):])
+		}
+		total += len(m.Text)
+		if total > 65536 && i < len(p.Messages)-1 {
+			p.Messages = p.Messages[i+1:]
+			break
+		}
+	}
+	if len(p.Messages) > 200 {
+		p.Messages = p.Messages[len(p.Messages)-200:]
+	}
+	s.saveLocked()
+}
+
+func (s *Server) permission(ctx context.Context, paneID, runID string, p model.Permission) (string, error) {
+	p.PaneID = paneID
+	p.ID = paneID + ":" + runID[:8] + ":" + p.ID
+	a := &approval{permission: p, answer: make(chan string, 1)}
+	s.mu.Lock()
+	if s.closing || s.runs[paneID] != runID {
+		s.mu.Unlock()
+		return "", context.Canceled
+	}
+	s.approvals[p.ID] = a
+	if pane := s.paneLocked(paneID); pane != nil {
+		pane.TurnState = "waiting-permission"
+	}
+	s.revision.Add(1)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.approvals, p.ID)
+		if pane := s.paneLocked(paneID); pane != nil && s.runs[paneID] == runID && pane.TurnState == "waiting-permission" {
+			pane.TurnState = "running"
+		}
+		s.revision.Add(1)
+		s.mu.Unlock()
+	}()
+	select {
+	case option := <-a.answer:
+		return option, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-s.ctx.Done():
+		return "", s.ctx.Err()
+	}
+}
+
+func (s *Server) replyPermission(raw []byte) error {
+	var args struct {
+		ID       string `json:"id"`
+		OptionID string `json:"option_id"`
+	}
+	if err := decode(raw, &args); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.approvals[args.ID]
+	if a == nil {
+		return errors.New("审批请求已失效")
+	}
+	valid := args.OptionID == ""
+	for _, o := range a.permission.Options {
+		if o.ID == args.OptionID {
+			valid = true
+			if s.storeErr != nil && !strings.HasPrefix(o.Kind, "reject") {
+				return errors.New("状态无法持久化时只允许拒绝或取消审批")
+			}
+		}
+	}
+	if !valid {
+		return fmt.Errorf("审批选项无效：%s", args.OptionID)
+	}
+	select {
+	case a.answer <- args.OptionID:
+		delete(s.approvals, args.ID)
+		return nil
+	default:
+		return errors.New("审批已经响应")
+	}
+}

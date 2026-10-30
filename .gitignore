@@ -1,0 +1,38 @@
+# Default deny. Add new source directories and asset types explicitly.
+*
+
+# Repository files.
+!/.gitignore
+!/Makefile
+!/README.md
+!/README.zh-CN.md
+!/go.mod
+!/go.sum
+
+# Go source (including *_test.go); generated binaries remain ignored.
+!/cmd/
+!/cmd/wtable/
+!/cmd/wtable/*.go
+!/internal/
+!/internal/agent/
+!/internal/agent/*.go
+!/internal/config/
+!/internal/config/*.go
+!/internal/model/
+!/internal/model/*.go
+!/internal/rpc/
+!/internal/rpc/*.go
+!/internal/server/
+!/internal/server/*.go
+!/internal/store/
+!/internal/store/*.go
+!/internal/terminal/
+!/internal/terminal/*.go
+!/internal/tui/
+!/internal/tui/*.go
+
+# Maintained Python scripts.
+!/scripts/
+!/scripts/*.py
+!/scripts/fixtures/
+!/scripts/fixtures/*.py
