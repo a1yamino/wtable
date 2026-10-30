@@ -97,6 +97,14 @@ Account profiles are read from `<WTABLE_HOME>/accounts.json`, without account sc
 
 Editing configuration does not change a running process's environment. Default layer selection lasts only for the current TUI session.
 
+## Collaboration Graph
+
+Press `Ctrl-a G` to open the live graph. Arrows point from sender to recipient. Nodes in a cycle share a level; names determine order within a level. Dashed `you → pane` edges represent the human entry point and cannot be selected or deleted.
+
+Use `j/k` to select nodes and Enter to open the selected pane in focus mode. Press `e` to switch between nodes and real grant edges; `x` asks to delete the selected grant. Only `y` confirms deletion, cancelling queued tasks in that direction; `n` or Escape cancels, and Enter does not confirm. Arrow keys pan the graph. Related tasks appear below with ID, direction, state, and unread status; Page Up/Down scrolls the list. Escape returns to the pane view.
+
+The controller can request `state.get` with `graph: true` for `graph.nodes` and `graph.edges`; add `frames: false` to skip terminal frames. This projection does not change authorization.
+
 ## Keyboard controls
 
 Press `Ctrl-a` first, then the indicated key:
@@ -113,6 +121,7 @@ Press `Ctrl-a` first, then the indicated key:
 | `b` | Show or hide the task bar |
 | `[` | Enter scrollback mode; use arrow keys or `j/k` to scroll, `y` to copy visible text, and `q` to leave |
 | `t` | Open multi-target task creation with delivery, queuing, and reporting options |
+| `G` | Open the collaboration Graph; select nodes with `j/k`, Enter to focus a pane |
 | `g` / `r` | Open the add-edge picker / edge list without typing IDs |
 | `k` | Open Tasks: Enter details, `r` retry, `x` cancel, `b` reports |
 | `x` | Stop the current pane; enter `y` to confirm |
@@ -277,4 +286,4 @@ External provider authentication, adapter compatibility, and session recovery mu
 - Up to 32 panes and 2,000 task records are retained. Panes can be removed from Agents; task history has no cleanup command. The structured chat view is bounded, while complete task results are stored separately.
 - Notes, role management, an embedded editor, account pools, scheduled tasks, images, and browser portals are planned for later versions.
 
-P0 delivery/reporting and P1 control-panel onboarding are implemented. P2 Graph is not yet implemented. `docs/`, `.dev/`, and `bin/` remain outside the Git allowlist.
+P0 delivery/reporting, P1 control-panel onboarding, and P2 Graph v1 are implemented. `docs/`, `.dev/`, and `bin/` remain outside the Git allowlist.

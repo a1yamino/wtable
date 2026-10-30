@@ -44,6 +44,7 @@ type ui struct {
 	taskQueue                           bool
 	taskScreen                          *model.Frame
 	panel                               *controlPanel
+	graph                               *graphView
 	panelResults                        chan panelResult
 	activeCwd, activeLayer              string
 	acpInputs                           map[string]*lineEdit
@@ -169,7 +170,7 @@ func (u *ui) refresh() (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(u.ctx, 3*time.Second)
 	defer cancel()
-	if err := u.client.Call(ctx, "state.get", map[string]any{"offsets": u.offsets, "ids": ids}, &next); err != nil {
+	if err := u.client.Call(ctx, "state.get", map[string]any{"offsets": u.offsets, "ids": ids, "graph": u.graph != nil, "frames": u.graph == nil}, &next); err != nil {
 		return false, err
 	}
 	changed := !reflect.DeepEqual(u.snapshot, next)
@@ -240,6 +241,9 @@ func (u *ui) send(data string) {
 }
 func (u *ui) handlePaste(data string) {
 	u.selection = nil
+	if u.graph != nil {
+		return
+	}
 	if u.panel != nil && !u.taskView && u.mode == "" {
 		if u.panel.form != "" && !u.panel.busy && len(u.snapshot.Permissions) == 0 {
 			f := &u.panel.fields[u.panel.field]
@@ -318,6 +322,10 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		u.edit(e)
 		return false
 	}
+	if u.graph != nil {
+		u.graphKey(e)
+		return false
+	}
 	if u.taskView {
 		u.taskKey(e)
 		return false
@@ -358,6 +366,8 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		switch s {
 		case "?":
 			u.help = true
+		case "G":
+			u.openGraph()
 		case "a":
 			u.openPanel(0)
 		case "n":

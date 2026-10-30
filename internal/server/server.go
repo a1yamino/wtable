@@ -345,6 +345,7 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 		Offsets map[string]int `json:"offsets"`
 		IDs     []string       `json:"ids"`
 		Frames  *bool          `json:"frames"`
+		Graph   bool           `json:"graph"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return model.Snapshot{}, err
@@ -367,6 +368,9 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 		result.Permissions = append(result.Permissions, a.permission)
 	}
 	s.mu.Unlock()
+	if args.Graph {
+		result.Graph = snapshotGraph(result)
+	}
 	if args.Frames == nil || *args.Frames {
 		for i := range result.Panes {
 			p := &result.Panes[i]

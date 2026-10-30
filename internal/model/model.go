@@ -104,6 +104,30 @@ type Edge struct {
 	To   string `json:"to"`
 }
 
+// Graph is a display-only projection; its virtual edges never grant access.
+type Graph struct {
+	Nodes []GraphNode `json:"nodes"`
+	Edges []GraphEdge `json:"edges"`
+}
+
+type GraphNode struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Preset    string   `json:"preset"`
+	Backend   string   `json:"backend"`
+	Layer     string   `json:"layer"`
+	State     string   `json:"state"`
+	Attention []string `json:"attention"`
+	Unread    int      `json:"unread"`
+}
+
+type GraphEdge struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Kind   string `json:"kind"` // grant or virtual
+	Active int    `json:"active"`
+}
+
 type Task struct {
 	ID             string     `json:"id"`
 	From           string     `json:"from"`
@@ -180,6 +204,7 @@ type Snapshot struct {
 	Layers      []Layer      `json:"layers"`
 	Permissions []Permission `json:"permissions"`
 	Reports     []Report     `json:"reports"`
+	Graph       *Graph       `json:"graph,omitempty"`
 	Revision    uint64       `json:"revision"`
 }
 
