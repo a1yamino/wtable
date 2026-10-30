@@ -32,22 +32,15 @@ func snapshotGraph(snapshot model.Snapshot) *model.Graph {
 	for _, edge := range snapshot.Edges {
 		graph.Edges = append(graph.Edges, model.GraphEdge{From: edge.From, To: edge.To, Kind: "grant"})
 	}
-	markUnread := func(from, to string) {
-		if from == "controller" {
-			from = "you"
-		}
+	// Unread belongs to the inbox recipient, never both participants.
+	markUnread := func(to string) {
 		if to == "controller" {
 			to = "you"
 		}
-		for _, id := range []string{from, to} {
-			if i, ok := indices[id]; ok {
-				graph.Nodes[i].Unread++
-				if !contains(graph.Nodes[i].Attention, "bell") {
-					graph.Nodes[i].Attention = append(graph.Nodes[i].Attention, "bell")
-				}
-			}
-			if from == to {
-				break
+		if i, ok := indices[to]; ok {
+			graph.Nodes[i].Unread++
+			if !contains(graph.Nodes[i].Attention, "bell") {
+				graph.Nodes[i].Attention = append(graph.Nodes[i].Attention, "bell")
 			}
 		}
 	}
@@ -61,12 +54,12 @@ func snapshotGraph(snapshot model.Snapshot) *model.Graph {
 			active[model.Edge{From: from, To: task.To}]++
 		}
 		if !task.Seen && contains([]string{"completed", "failed", "unknown"}, task.State) {
-			markUnread(task.From, task.To)
+			markUnread(task.To)
 		}
 	}
 	for _, report := range snapshot.Reports {
 		if !report.Seen {
-			markUnread(report.From, report.To)
+			markUnread(report.To)
 		}
 	}
 	for i := range graph.Edges {

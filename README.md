@@ -101,7 +101,7 @@ Editing configuration does not change a running process's environment. Default l
 
 Press `Ctrl-a G` to open the live graph. Arrows point from sender to recipient. Nodes in a cycle share a level; names determine order within a level. Dashed `you → pane` edges represent the human entry point and cannot be selected or deleted.
 
-Use `j/k` to select nodes and Enter to open the selected pane in focus mode. Press `e` to switch between nodes and real grant edges; `x` asks to delete the selected grant. Only `y` confirms deletion, cancelling queued tasks in that direction; `n` or Escape cancels, and Enter does not confirm. Arrow keys pan the graph. Related tasks appear below with ID, direction, state, and unread status; Page Up/Down scrolls the list. Escape returns to the pane view.
+Use `j/k` to select nodes and Enter to open the selected pane in focus mode. Press `e` to switch between nodes and real grant edges; `x` asks to delete the selected grant. Only `y` confirms deletion, cancelling queued tasks in that direction; `n` or Escape cancels, and Enter does not confirm. Arrow keys pan the graph. Related tasks and reports appear below with ID, direction, state, and unread status; reports carry a `report` label. Page Up/Down scrolls the list. Unread counts and their `bell` marker belong only to the recipient. Node boxes show names, and selected-edge details show the `active` count. Escape returns to the pane view.
 
 The controller can request `state.get` with `graph: true` for `graph.nodes` and `graph.edges`; add `frames: false` to skip terminal frames. This projection does not change authorization.
 

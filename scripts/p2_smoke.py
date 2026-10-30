@@ -96,6 +96,16 @@ def run(args):
         completed = peer_call("B", "task.send", {"to": ids["C"], "prompt": "GRAPH_UNREAD_TASK", "delivery_mode": "claim"})
         assert peer_call("C", "task.next", {})["id"] == completed["id"]
         peer_call("C", "task.result", {"id": completed["id"], "result": "Graph unread result"})
+        task_nodes = {n["id"]: n for n in state()["graph"]["nodes"]}
+        assert task_nodes[ids["C"]]["unread"] == 1 and "bell" in task_nodes[ids["C"]]["attention"]
+        assert all(n["unread"] == 0 and "bell" not in n["attention"] for pane_id, n in task_nodes.items() if pane_id != ids["C"])
+        record("completed_task_unread_and_bell_belong_only_to_recipient")
+        notify_task = rpc.call("task.send", {"to": ids["B"], "prompt": "GRAPH_NOTIFY_TASK", "delivery_mode": "claim",
+            "on_complete": "notify", "report_to": ids["D"]})
+        assert peer_call("B", "task.next", {})["id"] == notify_task["id"]
+        peer_call("B", "task.result", {"id": notify_task["id"], "result": "Graph notify result"})
+        notification = next(r for r in rpc.call("report.list") if r["parent_task"] == notify_task["id"])
+        assert notification["from"] == ids["B"] and notification["to"] == ids["D"] and notification["state"] == "delivered"
         running = peer_call("C", "task.send", {"to": ids["D"], "prompt": "GRAPH_RUNNING_TASK", "delivery_mode": "claim"})
         assert peer_call("D", "task.next", {})["id"] == running["id"]
         queued = peer_call("A", "task.send", {"to": ids["B"], "prompt": "GRAPH_QUEUED_TASK", "delivery_mode": "claim"})
@@ -118,7 +128,8 @@ def run(args):
         active = {(e["from"], e["to"]): e["active"] for e in graph["edges"]}
         assert active[(ids["A"], ids["B"])] == active[("you", ids["A"])] == 0
         assert active[(ids["C"], ids["D"])] == 1
-        assert all(nodes[ids[name]]["unread"] == 1 and "bell" in nodes[ids[name]]["attention"] for name in "BC")
+        assert all(nodes[ids[name]]["unread"] == 1 and "bell" in nodes[ids[name]]["attention"] for name in "BCD")
+        assert all(nodes[pane_id]["unread"] == 0 and "bell" not in nodes[pane_id]["attention"] for pane_id in ["you", ids["A"]])
         save("initial-state.json", json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
         record("opt_in_graph_projection_matches_real_nodes_grants_virtual_edges_and_active_tasks")
 
@@ -168,14 +179,18 @@ def run(args):
                 send("j")
             raise AssertionError("cannot select edge: " + source + " -> " + target)
 
+        def related_line(item_id):
+            return next((line for line in screen().splitlines() if item_id in line.split()), "")
+
         wait_until(lambda: shown("PEER_READY"), "initial TUI")
         prefix("G")
         wait_until(lambda: shown("Graph"), "Graph opened")
         screenshot("cycle")
         rows = screen().splitlines()
         assert any(arrow in "\n".join(rows[2:32]) for arrow in ["▶", "▼", "▲", "◀"]), "diagram direction arrows missing"
-        positions = {name: next(i for i, row in enumerate(rows) if "│" + name + " · " in row) for name in "ABCD"}
+        positions = {name: next(i for i, row in enumerate(rows) if "│" + name + " " in row) for name in "ABCD"}
         assert positions["A"] == positions["B"] == positions["C"] < positions["D"], positions
+        assert all(pane_id not in screen() for pane_id in ids.values()), "Graph node boxes should show names without pane IDs"
         record("graph_opens_from_prefix_G_and_renders_directed_cycle_and_downstream_node")
 
         baseline = {pane_id: pane_text(pane_id) for pane_id in ids.values()}
@@ -197,12 +212,43 @@ def run(args):
         screenshot("related-tasks")
         assert "queued" in screen() and "A → B" in screen(), "related task direction or state missing"
         select_node("B")
-        assert completed["id"] in screen() and "[completed] · 未读" in screen(), "related unread result missing"
+        assert completed["id"] in screen() and "未读" not in related_line(completed["id"]), "task sender must not show recipient unread"
+        select_node("C")
+        assert completed["id"] in screen() and "[completed] · 未读" in related_line(completed["id"]), "related unread result missing"
         screenshot("unread-task")
         record("selected_node_lists_related_task_id_direction_state_and_you_cannot_delete_virtual_edges")
 
+        select_node("B")
+        wait_until(lambda: notification["id"] in screen(), "report listed for sender")
+        sender_line = related_line(notification["id"])
+        assert all(value in sender_line for value in ["report", "B → D", "delivered"]), sender_line
+        assert "未读" not in sender_line, "report sender must not show recipient unread"
+        assert "未读" in related_line(notify_task["id"]), "notify task recipient should retain its own unread task"
+        screenshot("report-sender")
+        select_node("D")
+        wait_until(lambda: notification["id"] in screen(), "report listed for recipient")
+        recipient_line = related_line(notification["id"])
+        assert all(value in recipient_line for value in ["report", "B → D", "delivered", "未读"]), recipient_line
+        screenshot("report-recipient")
+        peer_call("D", "report.seen", {"id": notification["id"]})
+        after_report_seen = {n["id"]: n for n in state()["graph"]["nodes"]}
+        assert after_report_seen[ids["D"]]["unread"] == 0 and "bell" not in after_report_seen[ids["D"]]["attention"]
+        assert all(after_report_seen[ids[name]]["unread"] == 1 for name in "BC"), "report.seen must not clear task unread"
+        wait_until(lambda: notification["id"] in screen() and "未读" not in related_line(notification["id"]), "seen report row refreshed")
+        screenshot("report-seen")
+        peer_call("B", "task.seen", {"id": notify_task["id"]})
+        peer_call("C", "task.seen", {"id": completed["id"]})
+        assert all(n["unread"] == 0 and "bell" not in n["attention"] for n in state()["graph"]["nodes"])
+        save("seen-state.json", json.dumps(state(), ensure_ascii=False, indent=2) + "\n")
+        record("notify_reports_list_both_endpoints_mark_only_recipient_unread_and_seen_clears_counts_and_bell")
+
         send("e")
         screenshot("edge-selection")
+        select_edge("C", "D")
+        assert "active 1" in screen().splitlines()[1], "selected edge summary must expose active task count"
+        assert all("active" not in row for row in screen().splitlines()[2:32]), "active count must not be placed on diagram edges"
+        screenshot("active-edge")
+        record("selected_edge_summary_shows_active_count_without_diagram_edge_labels")
         select_edge("A", "B")
         send("k"); assert not shown("选中边：A → B ·"), "k must select the previous real edge"
         send("j"); assert shown("选中边：A → B ·"), "j must return to the selected real edge"

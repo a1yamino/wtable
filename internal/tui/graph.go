@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v3"
 	"github.com/rivo/uniseg"
@@ -397,7 +398,7 @@ func (u *ui) drawGraph() {
 		if n.ID == v.node {
 			style = focusStyle
 		}
-		text := []string{"┌" + strings.Repeat("─", r.w-2) + "┐", n.Name + " · " + n.ID, n.Backend + " · " + n.State, fmt.Sprintf("未读 %d  %s", n.Unread, strings.Join(n.Attention, ",")), "└" + strings.Repeat("─", r.w-2) + "┘"}
+		text := []string{"┌" + strings.Repeat("─", r.w-2) + "┐", n.Name, n.Backend + " · " + n.State, fmt.Sprintf("未读 %d  %s", n.Unread, strings.Join(n.Attention, ",")), "└" + strings.Repeat("─", r.w-2) + "┘"}
 		for row, s := range text {
 			y := r.y + row - v.y + 2
 			if y < 2 || y >= bottom {
@@ -427,17 +428,16 @@ func (u *ui) drawGraph() {
 	if v.edges {
 		detail = "没有真实授权边"
 		if len(edges) > 0 {
-			detail = "选中边：" + u.paneName(v.edge.From) + " → " + u.paneName(v.edge.To) + " · x 删除（需确认）"
+			for _, edge := range edges {
+				if edge.From == v.edge.From && edge.To == v.edge.To {
+					detail = fmt.Sprintf("选中边：%s → %s · active %d · x 删除（需确认）", u.paneName(edge.From), u.paneName(edge.To), edge.Active)
+					break
+				}
+			}
 		}
 	}
 	u.line(0, 1, w, detail, tcell.StyleDefault)
-	related := []model.Task{}
-	for _, t := range u.snapshot.Tasks {
-		if t.From == v.node || t.To == v.node || (v.node == "you" && (t.From == "controller")) {
-			related = append(related, t)
-		}
-	}
-	sort.SliceStable(related, func(i, j int) bool { return related[i].CreatedAt.After(related[j].CreatedAt) })
+	related := u.graphItems(v.node)
 	capacity := max(0, h-bottom-2)
 	v.tasks = min(v.tasks, max(0, len(related)-capacity))
 	u.line(0, bottom, w, fmt.Sprintf("关联任务 · %s · %d 条 · PgUp/PgDn 滚动", u.paneName(v.node), len(related)), barStyle)
@@ -445,11 +445,11 @@ func (u *ui) drawGraph() {
 		t := related[i+v.tasks]
 		unread := ""
 		style := tcell.StyleDefault
-		if !t.Seen && (t.State == "completed" || t.State == "failed" || t.State == "unknown") {
+		if t.unread {
 			unread = " · 未读"
 			style = style.Bold(true)
 		}
-		u.line(0, bottom+1+i, w, fmt.Sprintf("%s  %s → %s  [%s]%s", t.ID, u.paneName(t.From), u.paneName(t.To), t.State, unread), style)
+		u.line(0, bottom+1+i, w, fmt.Sprintf("%s%s  %s → %s  [%s]%s", t.kind, t.id, u.paneName(t.from), u.paneName(t.to), t.state, unread), style)
 	}
 	if len(related) == 0 {
 		u.line(0, bottom+1, w, "暂无关联任务", tcell.StyleDefault)
@@ -477,4 +477,39 @@ func drawGraphLine(u *ui, x, y, width int, text string, style tcell.Style) {
 		}
 		x += n
 	}
+}
+
+// Reports remain distinct entries: their sender is the worker, and their
+// recipient can differ from both original task participants.
+type graphItem struct {
+	id, kind, from, to, state string
+	unread                    bool
+	created                   time.Time
+}
+
+func (u *ui) graphItems(node string) []graphItem {
+	if node == "you" {
+		node = "controller"
+	}
+	items := []graphItem{}
+	for _, t := range u.snapshot.Tasks {
+		if t.From != node && t.To != node {
+			continue
+		}
+		unread := t.To == node && !t.Seen && (t.State == "completed" || t.State == "failed" || t.State == "unknown")
+		items = append(items, graphItem{id: t.ID, from: t.From, to: t.To, state: t.State, unread: unread, created: t.CreatedAt})
+	}
+	for _, r := range u.snapshot.Reports {
+		if r.From != node && r.To != node {
+			continue
+		}
+		items = append(items, graphItem{id: r.ID, kind: "report ", from: r.From, to: r.To, state: r.State, unread: r.To == node && !r.Seen, created: r.CreatedAt})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].created.Equal(items[j].created) {
+			return items[i].id < items[j].id
+		}
+		return items[i].created.After(items[j].created)
+	})
+	return items
 }
