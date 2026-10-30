@@ -72,8 +72,7 @@ func (s *Server) readyLocked(p *model.Pane) error {
 		return errors.New("not-ready: pane 进程已停止")
 	}
 	c := deliveryConfig(p)
-	lines := frameLines(term.Snapshot(0))
-	lines = lines[max(0, len(lines)-c.TailLines):]
+	lines, _ := term.Tail(c.TailLines)
 	if c.BlockedRegex != "" {
 		re, err := regexp.Compile(c.BlockedRegex)
 		if err != nil {
@@ -128,6 +127,8 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 		t.State = "cancelled"
 		t.Result = "授权连线已移除"
 		t.UpdatedAt = time.Now()
+		t.Seen = false
+		s.completeReportLocked(t)
 		s.saveLocked()
 		s.mu.Unlock()
 		return errors.New("任务不能投递：状态已改变或服务不可用")
@@ -179,6 +180,8 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 		t.DeliveryStatus = "write-unconfirmed"
 		t.DeliveryError = err.Error()
 		t.UpdatedAt = time.Now()
+		t.Seen = false
+		s.completeReportLocked(t)
 		s.saveLocked()
 	}
 	s.mu.Unlock()
@@ -266,6 +269,7 @@ func (s *Server) deliveryLoop() {
 					t.DeliveryError = "ack_timeout: 未收到 ack 或 result，不会自动重投"
 					t.UpdatedAt = time.Now()
 					t.Seen = false
+					s.completeReportLocked(t)
 					changed = true
 				}
 			}

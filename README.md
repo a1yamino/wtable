@@ -28,7 +28,7 @@ Use a short absolute path for `WTABLE_HOME` to stay within the macOS Unix socket
 
 ## Terminals and agents
 
-Create panes from another terminal. They appear automatically in the running TUI:
+Create panes from another terminal. New sessions run in the background; use `Ctrl-a f` to open one:
 
 ```sh
 ./bin/wtable new shell --dir "$PWD"
@@ -57,7 +57,7 @@ Press `Ctrl-a a` to open the panel. Tab / Shift-Tab switches pages, arrow keys o
 
 | Page | Actions |
 |---|---|
-| Agents | `a` add, `e` edit name/role/account, `d` remove, Enter focus, `v` preview brief, `b` resend brief, `l` diagnostics, `R` restart |
+| Agents | `a` add, `e` edit name/role/account, `d` remove, Enter focus, `p` park/open, `v` peek, `B` preview brief, `b` resend brief, `O` roles, `l` diagnostics, `R` restart |
 | Edges | `a` choose a source and multiple targets, `x` delete, `t` filter by the focused pane |
 | Tasks | `s` send to multiple targets, Enter details, `r` retry, `x` cancel, `b` reports |
 | Layers | `n` create a worktree, Enter use its directory for new panes |
@@ -97,6 +97,42 @@ Account profiles are read from `<WTABLE_HOME>/accounts.json`, without account sc
 
 Editing configuration does not change a running process's environment. Default layer selection lasts only for the current TUI session.
 
+## Views, roles, and account references
+
+The UI initially focuses one pane. `Ctrl-a f` opens the pane picker; `Ctrl-a |` and `Ctrl-a -` split the focused leaf with another pane. Drag dividers to adjust proportions, which survive window resizing. `Ctrl-a z` toggles focus within the current layout. Use `Ctrl-a T` to create a view tab, `{` / `}` to switch, `,` to rename, and `W` to close it. These commands use the `Ctrl-a` prefix. Closing a tab does not stop processes. Tabs, layout trees and parking are local to the current attachment; reattaching starts in focus mode.
+
+Agents `p` parks or opens a pane, `v` peeks at its last 20 text lines, and Enter opens it. Graph jumps also open parked panes. Background PTYs retain their last size; only visible panes receive frame requests and resizes. `Ctrl-a !` opens the next pane needing attention. Opening a pane marks its associated incoming task results and reports as seen. Lists show recent output, activity, readiness, endpoint type and denied-operation counts. Creation forms warn about shared directories/layers and accounts; `L` creates an isolated layer and returns to the form. Readiness describes the delivery gate, not task acknowledgement.
+
+`state.get` now distinguishes omitted/null `ids` (all frames), `[]` (metadata only), and a nonempty list (selected frames). `frames: false` always suppresses frames. `pane.peek` returns text without constructing a frame.
+
+Agents `O` opens role template CRUD. Templates live at `<WTABLE_HOME>/roles/<name>.md`, with a `---` metadata header containing `name`, optional `preset`, `backend`, and `cwd`, followed by Markdown instructions. Launch snapshots the instructions and their SHA-256 hash; template edits/deletion and pane restarts retain the existing snapshot. Plain renames preserve it. Selecting a different template captures new instructions; explicitly resend the brief to deliver them. Free-text `--role` remains supported and the entire brief is still capped at 2 KiB.
+
+```sh
+./bin/wtable role put --preset codex-pty reviewer ./review-instructions.md
+./bin/wtable role list
+./bin/wtable recruit reviewer --role-template reviewer --brief
+./bin/wtable pane edit --role-template reviewer existing-pane
+./bin/wtable role delete reviewer
+```
+
+Account `env` values accept legacy strings or exactly one of `literal`, `env_ref`, and `keychain_ref`. References resolve at launch and resolved values are never written back. On macOS, keychain references read existing items using `/usr/bin/security`; wtable does not create or modify items.
+
+```json
+[{
+  "name": "gateway",
+  "endpoint": "compatible",
+  "env": {
+    "ANTHROPIC_BASE_URL": {"literal": "https://gateway.example"},
+    "ANTHROPIC_AUTH_TOKEN": {"env_ref": "WORK_GATEWAY_TOKEN"},
+    "OTHER_API_KEY": {"keychain_ref": {"service": "work-agent", "account": "me"}}
+  }
+}]
+```
+
+Endpoint labels are `official` (default), `compatible`, or `custom`. Nonofficial labels display a compatibility notice, not proof of compatibility. Missing references block launch with errors that do not expose values. Account environment changes do not affect running processes.
+
+`wtable audit` returns the latest 256 denied operations: caller, target, method, and time, without request bodies or credentials. Pane metadata retains cumulative counts. Direct grants already prevent agents from assigning to themselves. Content provenance and `--no-relay` are not implemented.
+
 ## Collaboration Graph
 
 Press `Ctrl-a G` to open the live graph. Arrows point from sender to recipient. Nodes in a cycle share a level; names determine order within a level. Dashed `you → pane` edges represent the human entry point and cannot be selected or deleted.
@@ -129,7 +165,7 @@ Press `Ctrl-a` first, then the indicated key:
 | `d` / `q` | Detach, keeping background sessions running |
 | `Ctrl-a` | Send a literal `Ctrl-a` by pressing it twice |
 
-Left-click a pane title or its content to focus it. Drag a divider to resize; grid dividers resize whole rows or columns. Proportions last for the current TUI session and reset when changing layouts or adding/removing panes; zooming and restoring preserves them. Mouse focus and resizing are disabled while a dialog is open.
+Left-click a pane title or its content to focus it. Drag a divider to resize its layout-tree split. Proportions last for the current TUI session and survive window resizing and zoom; choosing a new layout redistributes the current leaves. Mouse focus and resizing are disabled while a dialog is open.
 
 Drag within pane content to select text; releasing the left button copies it to the macOS clipboard. Selection supports multiple lines, reverse dragging, CJK text, and emoji. The selected view stays frozen until Escape or another click restores live output. Selection is limited to the current pane's visible content, without cross-pane selection or automatic scrolling.
 
@@ -213,7 +249,7 @@ Results can also be submitted through stdin. Delivered, accepted, unknown, cance
 
 `notify` writes only an inbox report: no terminal input and no new task. `handoff` creates a task with `ParentTask`, inheriting the parent's `From` and current `Origin` and applying normal delivery checks. Authorization always uses the original `From`; the parent's `To` and the report's `From` identify the executor. No report target defaults to `none`; specifying a target without a mode defaults to `notify`.
 
-The original sender's grant to the report target is checked at creation and completion. A revoked grant produces a readable `undeliverable` report. Completion and the single report for each parent are persisted together. Summaries are capped at 4KiB without a `ReportMode: full` option; full parent results remain accessible only to the original participants and controller.
+The original sender's grant to the report target is checked at creation and completion. A revoked grant produces a readable `undeliverable` report. Completion and the single report for each parent are persisted together. Unknown or cancelled tasks update the same report with a status notification and never trigger handoff. Late final results update that report and restore its unread flag; only the first final result can trigger handoff. The report `task_state` field identifies the parent task state. Summaries are capped at 4KiB without a `ReportMode: full` option; full parent results remain accessible only to the original participants and controller.
 
 ### Manual recovery
 
@@ -247,7 +283,7 @@ Run `wtable changes` or `wtable diff [PATH]` from the target repository to inspe
 
 ## Upgrading, recovery, and diagnostics
 
-The current version is `0.3.0`. The CLI checks the daemon version rather than silently sending new delivery options to an old daemon. Use a separate `WTABLE_HOME` to keep existing sessions running. To reuse a state directory, finish its old sessions, run `shutdown`, then start the new version. Reattaching does not upgrade the daemon; shutdown stops every pane in that state directory.
+The current version is `0.4.0`. The CLI checks the daemon version rather than silently sending new delivery options to an old daemon. Use a separate `WTABLE_HOME` to keep existing sessions running. To reuse a state directory, finish its old sessions, run `shutdown`, then start the new version. Reattaching does not upgrade the daemon; shutdown stops every pane in that state directory.
 
 ```sh
 ./bin/wtable diag
@@ -270,6 +306,8 @@ go build -o bin/wtable ./cmd/wtable
 python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.json
 python3 scripts/p0_smoke.py --binary bin/wtable --output .dev/test-results/p0.json
 python3 scripts/p1_smoke.py --binary bin/wtable --output .dev/test-results/p1.json
+python3 scripts/p2_smoke.py --binary bin/wtable --output .dev/test-results/p2.json
+python3 scripts/view_smoke.py --binary bin/wtable --output .dev/test-results/view.json
 ```
 
 The smoke script uses a real daemon, PTYs, SQLite, and temporary Git repositories. It asserts authorization behavior, task deduplication, approval effects on files, worktree isolation, and crash recovery. ACP checks use a deterministic local fixture and make no external model calls. The script cleans up its own processes and temporary directories and saves a JSON validation report.
@@ -282,8 +320,8 @@ External provider authentication, adapter compatibility, and session recovery mu
 - Scrollback retains up to 10,000 physical lines. Resizing does not reflow historical output. Full VT conformance has not been established.
 - The TUI polls full cell snapshots; cell deltas and event replay are not implemented. The original performance targets have not been validated.
 - Mouse selection and copying visible content are supported, alongside keyboard scrollback and copying the visible screen. Wheel forwarding to mouse-aware applications is supported; click/drag forwarding and the OSC 52 clipboard protocol are not supported.
-- Pane arrangement, size proportions, focus, and zoom belong to the current TUI session. Reattaching lays out the existing panes again.
+- Layout trees, tabs, parking, size proportions, focus, and zoom belong to the current TUI session. Reattaching starts in focus mode.
 - Up to 32 panes and 2,000 task records are retained. Panes can be removed from Agents; task history has no cleanup command. The structured chat view is bounded, while complete task results are stored separately.
-- Notes, role management, an embedded editor, account pools, scheduled tasks, images, and browser portals are planned for later versions.
+- Notes, an embedded editor, account pools, scheduled tasks, images, and browser portals are planned for later versions.
 
 P0 delivery/reporting, P1 control-panel onboarding, and P2 Graph v1 are implemented. `docs/`, `.dev/`, and `bin/` remain outside the Git allowlist.

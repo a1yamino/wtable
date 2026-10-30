@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -38,22 +39,25 @@ type Config struct {
 // responses are written outside that lock: a device query can otherwise
 // deadlock the output parser while it is waiting for its reply to be consumed.
 type Terminal struct {
-	mu         sync.Mutex
-	vt         *vt.Emulator
-	modes      map[ansi.Mode]bool
-	revision   uint64
-	lastOutput time.Time
-	pty        *os.File
-	cmd        *exec.Cmd
-	cfg        Config
-	inputMu    sync.Mutex
-	stopOnce   sync.Once
-	stopped    chan struct{}
-	finished   chan struct{}
-	readDone   chan struct{}
-	replies    chan []byte
-	errMu      sync.Mutex
-	failure    error
+	mu           sync.Mutex
+	vt           *vt.Emulator
+	modes        map[ansi.Mode]bool
+	revision     uint64
+	lastOutput   time.Time
+	tailRevision uint64
+	tailCount    int
+	tailText     []string
+	pty          *os.File
+	cmd          *exec.Cmd
+	cfg          Config
+	inputMu      sync.Mutex
+	stopOnce     sync.Once
+	stopped      chan struct{}
+	finished     chan struct{}
+	readDone     chan struct{}
+	replies      chan []byte
+	errMu        sync.Mutex
+	failure      error
 }
 
 func Start(ctx context.Context, cfg Config) (*Terminal, error) {
@@ -427,4 +431,47 @@ func (t *Terminal) Readiness() (bool, time.Time) {
 	default:
 	}
 	return syscall.Kill(t.cmd.Process.Pid, 0) == nil, t.lastOutput
+}
+
+// Tail reads text only, including scrollback, without allocating a cell frame.
+func (t *Terminal) Tail(count int) ([]string, time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	count = max(1, min(count, 100))
+	if t.tailCount == count && t.tailRevision == t.revision {
+		return append([]string(nil), t.tailText...), t.lastOutput
+	}
+	history := 0
+	if !t.vt.IsAltScreen() {
+		history = t.vt.ScrollbackLen()
+	}
+	lines := []string{}
+	// Skip unused blank rows below the last output; keep blanks within the tail.
+	for y := history + t.vt.Height() - 1; y >= max(0, history+t.vt.Height()-100-count) && len(lines) < count; y-- {
+		var text strings.Builder
+		for x := 0; x < t.vt.Width(); x++ {
+			var c *uv.Cell
+			if y < history {
+				c = t.vt.ScrollbackCellAt(x, y)
+			} else {
+				c = t.vt.CellAt(x, y-history)
+			}
+			if c == nil {
+				text.WriteByte(' ')
+			} else if c.Width > 0 {
+				text.WriteString(c.Content)
+			}
+		}
+		line := strings.TrimRight(text.String(), " ")
+		if len(lines) == 0 && line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+		lines[i], lines[j] = lines[j], lines[i]
+	}
+	t.tailRevision, t.tailCount = t.revision, count
+	t.tailText = append(t.tailText[:0], lines...)
+	return lines, t.lastOutput
 }

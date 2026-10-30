@@ -82,5 +82,5 @@ func (u *ui) panelDrawKey() string {
 	if p == nil {
 		return ""
 	}
-	return fmt.Sprint(p.tab, p.selected, p.field, p.scroll, p.form, p.targetID, p.confirmKind, p.confirmID, p.preview, p.busy, p.related, p.catalog, p.fields)
+	return fmt.Sprint(p.tab, p.selected, p.field, p.scroll, p.form, p.targetID, p.confirmKind, p.confirmID, p.preview, p.busy, p.related, p.catalog, p.fields, p.roleView, p.layerReturn)
 }

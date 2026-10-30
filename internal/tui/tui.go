@@ -60,6 +60,10 @@ type ui struct {
 	drag                                *divider
 	mouseDown                           bool
 	selection                           *textSelection
+	views                               []viewTab
+	viewIndex, nextTab                  int
+	parked                              map[string]bool
+	picker                              *panePicker
 }
 
 // Run attaches the control UI. Leaving the UI detaches; daemon panes keep running.
@@ -170,7 +174,7 @@ func (u *ui) refresh() (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(u.ctx, 3*time.Second)
 	defer cancel()
-	if err := u.client.Call(ctx, "state.get", map[string]any{"offsets": u.offsets, "ids": ids, "graph": u.graph != nil, "frames": u.graph == nil}, &next); err != nil {
+	if err := u.client.Call(ctx, "state.get", map[string]any{"offsets": u.offsets, "ids": ids, "graph": true, "frames": u.graph == nil}, &next); err != nil {
 		return false, err
 	}
 	changed := !reflect.DeepEqual(u.snapshot, next)
@@ -195,6 +199,8 @@ func (u *ui) refresh() (bool, error) {
 	if u.focus >= len(next.Panes) {
 		u.focus = max(0, len(next.Panes)-1)
 	}
+	u.syncViews()
+	u.markVisibleSeen()
 	if len(next.Permissions) > 0 && next.Permissions[0].ID != u.lastPermission {
 		u.lastPermission = next.Permissions[0].ID
 		// Do not reinterpret buffered paste as a permission decision.
@@ -225,7 +231,8 @@ func (u *ui) spawn(command []string) bool {
 		cwd = ""
 	}
 	if u.call("pane.spawn", model.SpawnParams{Backend: "pty", Command: command, Cwd: cwd, Layer: u.activeLayer, Cols: 80, Rows: 24}, &pane) {
-		u.focus = len(u.snapshot.Panes)
+		_, _ = u.refresh()
+		u.openPane(pane.ID, true)
 		u.status = "已新建终端 " + pane.Name
 		return true
 	}
@@ -236,12 +243,15 @@ func (u *ui) send(data string) {
 	if p == nil || p.Backend != "pty" || data == "" {
 		return
 	}
+	if _, visible := u.boxes[p.ID]; !visible {
+		return
+	}
 	u.offsets[p.ID] = 0
 	u.call("pane.input", map[string]string{"id": p.ID, "data": data}, nil)
 }
 func (u *ui) handlePaste(data string) {
 	u.selection = nil
-	if u.graph != nil {
+	if u.graph != nil || u.picker != nil {
 		return
 	}
 	if u.panel != nil && !u.taskView && u.mode == "" {
@@ -266,6 +276,9 @@ func (u *ui) handlePaste(data string) {
 	}
 	p := u.current()
 	if p == nil {
+		return
+	}
+	if _, visible := u.boxes[p.ID]; !visible {
 		return
 	}
 	if p.Backend == "acp" {
@@ -326,6 +339,10 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		u.graphKey(e)
 		return false
 	}
+	if u.picker != nil {
+		u.pickerKey(e)
+		return false
+	}
 	if u.taskView {
 		u.taskKey(e)
 		return false
@@ -379,14 +396,32 @@ func (u *ui) key(e *tcell.EventKey) bool {
 			u.panel.afterLoad = "custom"
 		case "o":
 			if len(u.snapshot.Panes) > 0 {
-				u.focus = (u.focus + 1) % len(u.snapshot.Panes)
+				u.openPane(u.snapshot.Panes[(u.focus+1)%len(u.snapshot.Panes)].ID, true)
 			}
 			u.resize()
+		case "f":
+			u.pickPane("")
+		case "|", "-":
+			u.pickPane(s)
+		case "T":
+			u.newTab()
+		case "{":
+			u.switchTab(-1)
+		case "}":
+			u.switchTab(1)
+		case "W":
+			u.closeTab()
+		case ",":
+			u.openInput("tab-name", u.tab().name)
+		case "!":
+			u.nextAttention()
 		case "s":
 			u.layout = (u.layout + 1) % 3
+			u.arrangeView()
 			u.resize()
 		case "z":
 			u.zoom = !u.zoom
+			u.tab().zoom = u.zoom
 			u.resize()
 		case "b":
 			u.tasks = !u.tasks
@@ -421,6 +456,12 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		return false
 	}
 	p := u.current()
+	if p == nil {
+		return false
+	}
+	if _, visible := u.boxes[p.ID]; !visible {
+		return false
+	}
 	if p != nil && restartable(p.State) && k == tcell.KeyEnter {
 		u.restartCurrent()
 		return false
@@ -471,6 +512,13 @@ func (u *ui) edit(e *tcell.EventKey) {
 	if e.Key() == tcell.KeyEnter {
 		input, mode := u.editor.Text(), u.mode
 		switch mode {
+		case "tab-name":
+			name := strings.TrimSpace(input)
+			if name == "" {
+				u.status = "请输入 tab 名称"
+				return
+			}
+			u.tab().name = truncateColumns(name, 24)
 		case "command":
 			if strings.TrimSpace(input) == "" {
 				return

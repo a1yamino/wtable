@@ -67,6 +67,9 @@ type controlPanel struct {
 	catalog                                                    model.Catalog
 	busy, related                                              bool
 	rows                                                       map[int]int
+	roleView                                                   bool
+	roleChanged                                                bool
+	layerReturn                                                []panelField
 }
 type panelResult struct {
 	owner  *controlPanel
@@ -163,12 +166,17 @@ func (u *ui) panelFinished(r panelResult) {
 		for i, p := range u.snapshot.Panes {
 			if p.ID == pane.ID {
 				u.focus = i
+				u.openPane(pane.ID, true)
 				r.owner.selected = i
 				break
 			}
 		}
 		r.owner.form = ""
 		u.status = "已保存 Agent：" + pane.Name
+	case "role.put", "role.delete":
+		r.owner.form = ""
+		r.owner.confirmKind = ""
+		u.panelAsync("preset.list", nil)
 	case "pane.remove":
 		r.owner.confirmKind = ""
 		_, _ = u.refresh()
@@ -184,6 +192,19 @@ func (u *ui) panelFinished(r panelResult) {
 		u.activeCwd = layer.Path
 		r.owner.form = ""
 		_, _ = u.refresh()
+		if r.owner.layerReturn != nil {
+			r.owner.fields = r.owner.layerReturn
+			r.owner.layerReturn = nil
+			r.owner.form = "agent"
+			r.owner.field = 0
+			r.owner.get("layer").options = u.layerOptions()
+			for i, o := range r.owner.get("layer").options {
+				if o.value == layer.Path {
+					r.owner.get("layer").choice = i
+				}
+			}
+			r.owner.get("cwd").edit.Set("")
+		}
 		u.status = "新 pane 默认使用 Layer：" + layer.Name
 	}
 }
@@ -220,6 +241,7 @@ func (u *ui) layerOptions() []panelOption {
 }
 func (u *ui) startAgentForm(edit bool) {
 	p := u.panel
+	p.roleChanged = false
 	p.field = 0
 	p.preview = ""
 	if edit {
@@ -240,7 +262,7 @@ func (u *ui) startAgentForm(edit bool) {
 		if !found {
 			accounts = append(accounts, panelOption{pane.Account, pane.Account + " · 原账号档案已缺失"})
 		}
-		p.fields = []panelField{textField("name", "名字", pane.Name), textField("role", "角色", pane.Role), optionField("account", "账号档案（运行中不可切换）", pane.Account, accounts)}
+		p.fields = []panelField{textField("name", "名字", pane.Name), textField("role", "角色", pane.Role), optionField("account", "账号档案（运行中不可切换）", pane.Account, accounts), optionField("role_template", "角色模板（重新快照）", pane.RoleTemplate, u.roleOptions())}
 		return
 	}
 	presets := []panelOption{}
@@ -269,6 +291,7 @@ func (u *ui) startAgentForm(edit bool) {
 		optionField("account", "账号档案", "", u.accountOptions()),
 		optionField("brief", "注入身份说明", "false", []panelOption{{"false", "关闭"}, {"true", "开启（≤2KB，可审阅）"}}),
 		multiField("connect", "新 Agent → 选中目标", u.paneOptions(true)),
+		optionField("role_template", "角色模板", "", u.roleOptions()),
 	}
 }
 func (u *ui) startEdgeForm() {
@@ -365,6 +388,8 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 		}
 		if p.confirmKind == "pane" {
 			u.panelAsync("pane.remove", map[string]string{"id": p.confirmID})
+		} else if p.confirmKind == "role" {
+			u.panelAsync("role.delete", map[string]string{"name": p.confirmID})
 		} else {
 			var edge model.Edge
 			if err := json.Unmarshal([]byte(p.confirmID), &edge); err != nil {
@@ -381,6 +406,10 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 	}
 	if p.form != "" {
 		u.panelFormKey(e)
+		return
+	}
+	if p.roleView {
+		u.rolePanelKey(e)
 		return
 	}
 	if e.Key() == tcell.KeyEscape {
@@ -413,6 +442,11 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 	p.selected = min(p.selected, max(0, u.panelCount()-1))
 	switch p.tab {
 	case 0:
+		if e.Str() == "O" {
+			p.roleView = true
+			p.selected = 0
+			return
+		}
 		if e.Str() == "a" {
 			u.startAgentForm(false)
 			return
@@ -423,15 +457,23 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 		pane := u.snapshot.Panes[p.selected]
 		switch {
 		case e.Key() == tcell.KeyEnter:
-			u.focus = p.selected
 			u.panel = nil
-			u.resize()
+			u.openPane(pane.ID, true)
+		case e.Str() == "p":
+			u.togglePark(pane.ID)
+		case e.Str() == "O":
+			p.roleView = true
+			p.selected = 0
+		case e.Str() == "L":
+			u.startLayerForm()
 		case e.Str() == "e":
 			u.startAgentForm(true)
 		case e.Str() == "d":
 			p.confirmKind = "pane"
 			p.confirmID = pane.ID
 		case e.Str() == "v":
+			u.peekPane(pane)
+		case e.Str() == "B":
 			var brief struct{ Path, Text, TaskID string }
 			// JSON task_id is unused by preview; path/text are enough to audit the instructions.
 			if u.call("pane.brief", map[string]string{"id": pane.ID}, &brief) {
@@ -515,8 +557,18 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 }
 func (u *ui) panelFormKey(e *tcell.EventKey) {
 	p := u.panel
+	if p.form == "agent" && e.Str() == "L" && len(p.fields[p.field].options) > 0 {
+		p.layerReturn = p.fields
+		u.startLayerForm()
+		return
+	}
 	if e.Key() == tcell.KeyEscape {
 		p.form = ""
+		if p.layerReturn != nil {
+			p.fields = p.layerReturn
+			p.layerReturn = nil
+			p.form = "agent"
+		}
 		return
 	}
 	if e.Key() == tcell.KeyTab || e.Key() == tcell.KeyBacktab {
@@ -529,14 +581,14 @@ func (u *ui) panelFormKey(e *tcell.EventKey) {
 	}
 	f := &p.fields[p.field]
 	if e.Key() == tcell.KeyEnter {
-		if f.key == "prompt" && e.Modifiers()&tcell.ModAlt != 0 {
+		if (f.key == "prompt" || f.key == "instructions") && e.Modifiers()&tcell.ModAlt != 0 {
 			f.edit.Insert("\n")
 			return
 		}
 		u.submitPanelForm()
 		return
 	}
-	if f.key == "prompt" && e.Key() == tcell.KeyRune && e.Str() == "m" && e.Modifiers()&(tcell.ModAlt|tcell.ModCtrl) == tcell.ModAlt|tcell.ModCtrl {
+	if (f.key == "prompt" || f.key == "instructions") && e.Key() == tcell.KeyRune && e.Str() == "m" && e.Modifiers()&(tcell.ModAlt|tcell.ModCtrl) == tcell.ModAlt|tcell.ModCtrl {
 		f.edit.Insert("\n")
 		return
 	}
@@ -574,6 +626,10 @@ func (u *ui) panelFormKey(e *tcell.EventKey) {
 				}
 			}
 		}
+		if f.key == "role_template" {
+			p.roleChanged = true
+			u.applyRoleDefaults()
+		}
 	} else {
 		f.edit.Handle(e)
 	}
@@ -588,7 +644,7 @@ func (u *ui) submitPanelForm() {
 	}
 	switch p.form {
 	case "agent":
-		args := model.SpawnParams{Name: strings.TrimSpace(value("name")), Preset: value("preset"), Backend: value("backend"), Cwd: value("cwd"), Layer: value("layer"), Role: value("role"), Account: value("account"), InjectBrief: value("brief") == "true", ConnectTo: p.get("connect").values(), Cols: 80, Rows: 24}
+		args := model.SpawnParams{Name: strings.TrimSpace(value("name")), Preset: value("preset"), Backend: value("backend"), Cwd: value("cwd"), Layer: value("layer"), Role: value("role"), RoleTemplate: value("role_template"), Account: value("account"), InjectBrief: value("brief") == "true", ConnectTo: p.get("connect").values(), Cols: 80, Rows: 24}
 		if args.Name == "" {
 			u.status = "请填写 Agent 名字"
 			return
@@ -617,7 +673,14 @@ func (u *ui) submitPanelForm() {
 		}
 		u.panelAsync("pane.spawn", args)
 	case "edit":
-		u.panelAsync("pane.update", model.PaneUpdate{ID: p.targetID, Name: strings.TrimSpace(value("name")), Role: value("role"), Account: value("account")})
+		roleTemplate := value("role_template")
+		var selectedRole *string
+		if p.roleChanged {
+			selectedRole = &roleTemplate
+		}
+		u.panelAsync("pane.update", model.PaneUpdate{ID: p.targetID, Name: strings.TrimSpace(value("name")), Role: value("role"), RoleTemplate: selectedRole, Account: value("account")})
+	case "role":
+		u.panelAsync("role.put", model.RoleTemplate{Name: strings.TrimSpace(value("name")), Instructions: value("instructions"), Preset: value("preset"), Backend: value("backend"), Cwd: value("cwd")})
 	case "layer":
 		u.panelAsync("layer.create", map[string]string{"name": strings.TrimSpace(value("name")), "cwd": value("cwd"), "base": value("base")})
 	case "edge":

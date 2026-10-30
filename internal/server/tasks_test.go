@@ -146,8 +146,8 @@ func TestPTYGateVerificationAndCancellation(t *testing.T) {
 
 func TestRetryUnconfirmedCreatesNewAttempt(t *testing.T) {
 	s := taskTestServer(t)
-	s.state.Panes = []model.Pane{{ID: "pty", Backend: "pty", State: "running"}}
-	s.state.Tasks = []model.Task{{ID: "old", From: "controller", To: "pty", Prompt: "work", State: "delivered", DeliveryMode: "inject", DeliveryStatus: "write-unconfirmed"}}
+	s.state.Panes = []model.Pane{{ID: "pty", Backend: "pty", State: "running"}, {ID: "inbox", State: "running"}}
+	s.state.Tasks = []model.Task{{ID: "old", From: "controller", To: "pty", Prompt: "work", State: "delivered", DeliveryMode: "inject", DeliveryStatus: "write-unconfirmed", OnComplete: "handoff", ReportTo: "inbox"}}
 	value, err := s.retryTask(rawTask(map[string]any{"id": "old", "queue": true}))
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +155,9 @@ func TestRetryUnconfirmedCreatesNewAttempt(t *testing.T) {
 	next := value.(model.Task)
 	if next.ID == "old" || next.RetryOf != "old" || next.State != "queued" || s.state.Tasks[0].State != "unknown" {
 		t.Fatalf("invalid retry: %+v", s.state.Tasks)
+	}
+	if len(s.state.Reports) != 1 || s.state.Reports[0].TaskState != "unknown" || s.state.Reports[0].HandoffTask != "" || len(s.state.Tasks) != 2 {
+		t.Fatalf("retry did not report unknown without handoff: %+v", s.state)
 	}
 	for _, state := range []string{"queued", "running", "accepted", "cancelling"} {
 		s.state.Tasks[0].State = state
@@ -168,7 +171,7 @@ func TestRetryUnconfirmedCreatesNewAttempt(t *testing.T) {
 func TestInjectedCancellationSurvivesProcessExit(t *testing.T) {
 	s := taskTestServer(t)
 	s.runs = map[string]string{"pty": "run"}
-	s.state.Panes = []model.Pane{{ID: "pty", Backend: "pty", State: "running", DeliveryConfig: model.DeliveryConfig{SettleMS: 1, VerifyMS: 10, AckTimeoutMS: 100}}}
+	s.state.Panes = []model.Pane{{ID: "pty", Backend: "pty", State: "running", DeliveryConfig: model.DeliveryConfig{SettleMS: 1, VerifyMS: 10, AckTimeoutMS: 100}}, {ID: "inbox", State: "running"}}
 	exited := make(chan struct{})
 	term, err := terminal.Start(s.ctx, terminal.Config{
 		Command: []string{"/bin/cat"}, Cols: 160, Rows: 24,
@@ -182,7 +185,7 @@ func TestInjectedCancellationSurvivesProcessExit(t *testing.T) {
 	}
 	s.terminals["pty"] = term
 	time.Sleep(10 * time.Millisecond)
-	task, err := s.sendTask("controller", rawTask(model.SendParams{To: "pty", Prompt: "cancel after injection"}))
+	task, err := s.sendTask("controller", rawTask(model.SendParams{To: "pty", Prompt: "cancel after injection", OnComplete: "notify", ReportTo: "inbox"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +213,9 @@ func TestInjectedCancellationSurvivesProcessExit(t *testing.T) {
 	}
 	if confirmed.(model.Task).State != "cancelled" {
 		t.Fatalf("explicit stop confirmation failed: %+v", confirmed)
+	}
+	if len(s.state.Reports) != 1 || s.state.Reports[0].TaskState != "cancelled" {
+		t.Fatalf("confirmed PTY cancellation did not report: %+v", s.state.Reports)
 	}
 	late, err := s.taskResult("pty", rawTask(map[string]string{"id": task.ID, "result": "late result"}))
 	if err != nil {

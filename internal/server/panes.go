@@ -17,15 +17,39 @@ import (
 )
 
 func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, error) {
+	var role model.RoleTemplate
+	var snapshotHash string
 	if restartID == "" {
+		var err error
+		role, err = s.resolveRole(&args)
+		if err != nil {
+			return model.Pane{}, err
+		}
+		if args.RoleTemplate != "" {
+			snapshotHash = roleHash(role.Instructions)
+		}
 		if err := s.resolvePreset(&args); err != nil {
 			return model.Pane{}, err
 		}
+	}
+	if restartID != "" {
+		s.mu.Lock()
+		p := s.paneLocked(restartID)
+		if p != nil {
+			args.RoleTemplate = p.RoleTemplate
+			role.Instructions = p.RoleInstructions
+			snapshotHash = p.RoleHash
+		}
+		s.mu.Unlock()
 	}
 	if err := s.resolveLayer(&args); err != nil {
 		return model.Pane{}, err
 	}
 	profileEnv, err := s.accountEnv(args.Account)
+	if err != nil {
+		return model.Pane{}, err
+	}
+	endpoint, err := s.accountEndpoint(args.Account)
 	if err != nil {
 		return model.Pane{}, err
 	}
@@ -110,7 +134,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			targets = append(targets, target.ID)
 		}
 	}
-	candidate := model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, Preset: args.Preset, Role: args.Role, Account: args.Account, Layer: args.Layer, InjectBrief: args.InjectBrief, LogPath: s.paths.Log, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig}
+	candidate := model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, Preset: args.Preset, Role: args.Role, RoleTemplate: args.RoleTemplate, RoleInstructions: role.Instructions, RoleHash: snapshotHash, Account: args.Account, Endpoint: endpoint, Layer: args.Layer, InjectBrief: args.InjectBrief, LogPath: s.paths.Log, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig}
 	brief, briefErr := s.briefTextLocked(candidate, targets)
 	if briefErr != nil {
 		s.mu.Unlock()
@@ -141,6 +165,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			return model.Pane{}, err
 		}
 		p.BriefPath = candidate.BriefPath
+		p.Endpoint = endpoint
 		p.ExitSummary = ""
 		p.LogPath = s.paths.Log
 		p.State = "starting"
@@ -333,6 +358,9 @@ func (s *Server) paneExited(id, runID string, code int, err error) {
 				t.Result = "agent 进程退出，执行结果未确认"
 			}
 			t.UpdatedAt = time.Now()
+			if t.State == "unknown" {
+				s.completeReportLocked(t)
+			}
 		}
 	}
 	s.saveLocked()

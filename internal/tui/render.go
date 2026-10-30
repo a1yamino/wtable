@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"math"
 	"reflect"
 	"strings"
 
@@ -25,48 +24,19 @@ func (u *ui) resize() {
 	if u.tasks {
 		available -= min(6, max(0, h/3))
 	}
-	n := len(u.snapshot.Panes)
-	if n == 0 || w < 2 || available < 2 {
+	u.syncViews()
+	if w < 2 || available < 2 {
 		return
 	}
+	t := u.tab()
 	if u.zoom {
-		p := u.current()
-		if p != nil {
-			u.boxes[p.ID] = rect{0, 0, w, available}
+		if t.root.find(t.focus) != nil {
+			u.boxes[t.focus] = rect{0, 0, w, available}
 		}
 	} else {
-		cols, rows := 1, n
-		switch u.layout {
-		case 0:
-			cols = int(math.Ceil(math.Sqrt(float64(n))))
-			rows = (n + cols - 1) / cols
-		case 1:
-			cols = n
-			rows = 1
-		}
-		key := [2]int{u.layout, n}
-		if u.layoutKey != key || len(u.colCuts) != cols+1 || len(u.rowCuts) != rows+1 {
-			u.colCuts, u.rowCuts = equalCuts(cols), equalCuts(rows)
-			u.layoutKey = key
-			u.drag = nil
-		}
-		xs, xgap := axisPositions(w, u.colCuts, 8)
-		ys, ygap := axisPositions(available, u.rowCuts, 3)
-		for i, p := range u.snapshot.Panes {
-			cx, cy := i%cols, i/cols
-			u.boxes[p.ID] = rect{xs[cx] + cx*xgap, ys[cy] + cy*ygap, xs[cx+1] - xs[cx], ys[cy+1] - ys[cy]}
-		}
-		if xgap > 0 {
-			for i := 1; i < cols; i++ {
-				u.dividers = append(u.dividers, divider{rect{xs[i] + i - 1, 0, 1, available}, true, i})
-			}
-		}
-		if ygap > 0 {
-			for i := 1; i < rows; i++ {
-				u.dividers = append(u.dividers, divider{rect{0, ys[i] + i - 1, w, 1}, false, i})
-			}
-		}
+		u.layoutView(t.root, rect{0, 0, w, available})
 	}
+
 	if s := u.selection; s != nil {
 		r, ok := u.boxes[s.paneID]
 		if !ok || (rect{r.x, r.y + 1, r.w, r.h - 1}) != s.area {
@@ -110,7 +80,7 @@ func (u *ui) draw() {
 	if s := u.selection; s != nil {
 		selectionKey = fmt.Sprintf("%p:%d:%d:%t", s, s.anchor, s.end, s.moved)
 	}
-	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll, u.reportView, u.reportCursor, u.reportDetail, u.taskScreen, u.taskDelivery, u.taskQueue, u.panelDrawKey(), u.acpDrawKey(), u.graph)
+	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll, u.reportView, u.reportCursor, u.reportDetail, u.taskScreen, u.taskDelivery, u.taskQueue, u.panelDrawKey(), u.acpDrawKey(), u.graph, u.viewStatus(), u.picker, u.boxes)
 	if key == u.lastDrawKey && reflect.DeepEqual(u.snapshot, u.lastDrawSnapshot) {
 		return
 	}
@@ -118,6 +88,9 @@ func (u *ui) draw() {
 	u.lastDrawSnapshot = u.snapshot
 	u.screen.Clear()
 	u.screen.HideCursor()
+	if len(u.boxes) == 0 && u.graph == nil {
+		u.line(1, 1, max(0, w-2), "当前 tab 没有可见 pane · Ctrl-a f 选择 · Ctrl-a a 管理", barStyle)
+	}
 	for i, p := range u.snapshot.Panes {
 		r, ok := u.boxes[p.ID]
 		if !ok || r.h < 1 {
@@ -208,9 +181,12 @@ func (u *ui) draw() {
 	if u.copyMode {
 		status = "回看模式：↑↓ / j k 滚动 · PgUp/PgDn 翻页 · y 复制可见屏 · Esc 返回"
 	}
-	u.line(0, h-1, w, status, barStyle)
+	u.line(0, h-1, w, u.viewStatus()+" · "+status, barStyle)
+	if u.picker != nil {
+		u.drawPicker()
+	}
 	if u.help {
-		u.modal([]string{"wtable 快捷键（先按 Ctrl-a，再按下一键）", "?  帮助；任意键关闭帮助", "n  新建 $SHELL 终端", "a  控制面板：Agents / Edges / Tasks / Layers；c 自定义 Agent", "o  下一个 pane；s 网格 / 左右 / 上下；z 聚焦放大", "b  切换任务列表；t 给当前 pane 发送任务 / ACP prompt", "g  添加授权边选择器；r 授权边列表；t 多目标派活", "G  协作 Graph：j/k 选节点，Enter 打开，e 选边，x 删除", "k  任务列表：Enter 详情、Tab 报告；详情中重发 / 查看屏幕 / 人工处理", "面板表单：Tab 切字段，←→ 选项，Space 多选，Enter 提交", "R  原地重启已退出 pane；退出 pane 内 Enter 也可重启", "[  回看模式：↑↓、PgUp/PgDn；y 复制可见屏到剪贴板", "Ctrl-a Ctrl-a 发送原 Ctrl-a；普通 Ctrl-Z/P 等直达终端", "d / q  离开界面（后台 pane 保持运行）", "输入框：←→ 编辑，Home/End 行首尾，Ctrl-U/W 删除，↑↓ 历史", "Enter 提交；任务 Alt-Enter 换行；Esc 取消", "鼠标：点击 pane 聚焦；拖动分隔线调整行 / 列大小", "拖选 pane 内文字，松开复制；Esc / 点击恢复实时画面", "滚轮回看；应用启用鼠标时转发滚轮，Shift+滚轮强制回看", "MVP：选区限可见屏；点击不转发到 pane 内应用"})
+		u.modal([]string{"wtable 快捷键（先按 Ctrl-a，再按下一键）", "?  帮助；任意键关闭帮助", "n  新建 $SHELL 终端", "a  控制面板：Agents / Edges / Tasks / Layers；c 自定义 Agent", "o 下一个 pane；f 选择器；z 单看 / 分屏；| 左右分屏；- 上下分屏", "T 新 tab；{ / } 切 tab；W 关 tab；, 命名；! 下一个 attention", "b  切换任务列表；t 给当前 pane 发送任务 / ACP prompt", "g  添加授权边选择器；r 授权边列表；t 多目标派活", "G  协作 Graph：j/k 选节点，Enter 打开，e 选边，x 删除", "k  任务列表：Enter 详情、Tab 报告；详情中重发 / 查看屏幕 / 人工处理", "面板表单：Tab 切字段，←→ 选项，Space 多选，Enter 提交", "R  原地重启已退出 pane；退出 pane 内 Enter 也可重启", "[  回看模式：↑↓、PgUp/PgDn；y 复制可见屏到剪贴板", "Ctrl-a Ctrl-a 发送原 Ctrl-a；普通 Ctrl-Z/P 等直达终端", "d / q  离开界面（后台 pane 保持运行）", "输入框：←→ 编辑，Home/End 行首尾，Ctrl-U/W 删除，↑↓ 历史", "Enter 提交；任务 Alt-Enter 换行；Esc 取消", "鼠标：点击 pane 聚焦；拖动分隔线调整行 / 列大小", "拖选 pane 内文字，松开复制；Esc / 点击恢复实时画面", "滚轮回看；应用启用鼠标时转发滚轮，Shift+滚轮强制回看", "MVP：选区限可见屏；点击不转发到 pane 内应用"})
 	}
 	if u.graph != nil {
 		u.drawGraph()
@@ -327,7 +303,7 @@ func cellStyle(c model.Cell) tcell.Style {
 func (u *ui) drawInput() {
 	w, h := u.screen.Size()
 	width := max(1, min(90, max(1, w-4))-2)
-	title := map[string]string{"command": "新终端命令（通过 /bin/zsh -lc 执行）", "task": "发送任务", "edge": "添加授权边：来源名称 目标名称", "unedge": "删除授权边：来源名称 目标名称", "stop": "停止当前 pane：输入 y 后 Enter 确认", "task-done": "人工标记完成：输入实际结果", "task-fail": "人工标记失败：输入原因", "task-redirect": "重发到其他 pane：输入名称（保留原任务）", "task-confirm-stop": "确认任务已停止：输入 y（不会自动判断）", "task-raw": "原始输入：<Enter> <Esc> <Ctrl-C> <Up> <Down>，不自动回车"}[u.mode]
+	title := map[string]string{"tab-name": "tab 名称", "command": "新终端命令（通过 /bin/zsh -lc 执行）", "task": "发送任务", "edge": "添加授权边：来源名称 目标名称", "unedge": "删除授权边：来源名称 目标名称", "stop": "停止当前 pane：输入 y 后 Enter 确认", "task-done": "人工标记完成：输入实际结果", "task-fail": "人工标记失败：输入原因", "task-redirect": "重发到其他 pane：输入名称（保留原任务）", "task-confirm-stop": "确认任务已停止：输入 y（不会自动判断）", "task-raw": "原始输入：<Enter> <Esc> <Ctrl-C> <Up> <Down>，不自动回车"}[u.mode]
 	if u.mode == "task" {
 		if p := u.current(); p != nil {
 			title += " → " + p.Name

@@ -28,7 +28,7 @@ export WTABLE_HOME="$PWD/.dev/local"
 
 ## 终端与 Agent
 
-在另一个终端中创建 pane，已经打开的 TUI 会自动显示它：
+在另一个终端中创建 pane。新会话在后台运行，可用 `Ctrl-a f` 选择打开：
 
 ```sh
 ./bin/wtable new shell --dir "$PWD"
@@ -57,7 +57,7 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 
 | 页面 | 操作 |
 |---|---|
-| Agents | `a` 添加、`e` 编辑名字/角色/账号、`d` 移除、Enter 跳转、`v` 预览说明、`b` 重发说明、`l` 诊断、`R` 重启 |
+| Agents | `a` 添加、`e` 编辑名字/角色/账号、`d` 移除、Enter 跳转、`p` 驻留／打开、`v` 查看最近 20 行、`B` 预览说明、`b` 重发说明、`O` 角色库、`l` 诊断、`R` 重启 |
 | Edges | `a` 选择来源和多个目标、`x` 删除、`t` 只看当前 pane 相关的边 |
 | Tasks | `s` 多目标派活、Enter 详情、`r` 重发、`x` 取消、`b` 报告收件箱 |
 | Layers | `n` 创建 worktree、Enter 将选中目录设为新 pane 的默认目录 |
@@ -89,13 +89,55 @@ ACP pane 底部有常驻输入框，直接输入并按 Enter 即通过原任务�
 [{"id":"custom-agent","name":"Custom agent","backend":"pty","command":["/absolute/path/to/agent","--flag"]}]
 ```
 
-账号档案从 `<WTABLE_HOME>/accounts.json` 读取，不自动扫描账号或登录。界面、快照和 brief 只保存档案名称，不返回环境变量值；`WTABLE_*` 保留变量不可覆盖：
+账号档案从 `<WTABLE_HOME>/accounts.json` 读取，不自动扫描账号或登录。界面、快照和 brief 只暴露档案名称与端点类型，不返回环境变量值；`WTABLE_*` 保留变量不可覆盖：
 
 ```json
 [{"name":"work","env":{"CODEX_HOME":"/absolute/path/to/codex-profile"}}]
 ```
 
 配置变更不会修改已运行进程的环境。Layer 的默认选择仅在当前 TUI 会话内保留。
+
+### 角色模板与凭据引用
+
+在 Agents 页按 `O` 打开角色库，可添加、编辑、删除模板。创建 Agent 时选择角色模板，默认预设、后端和目录可继续调整。模板保存在 `<WTABLE_HOME>/roles/<name>.md`；文件包含 `---` 元数据头（`name`、`preset`、`backend`、`cwd`）与 Markdown 指令正文。
+
+```sh
+./bin/wtable role put --preset codex-pty reviewer ./review-instructions.md
+./bin/wtable role list
+./bin/wtable recruit reviewer --role-template reviewer --brief
+./bin/wtable pane edit --role-template reviewer existing-pane
+./bin/wtable role delete reviewer
+```
+
+启动时保存指令正文与 SHA-256 快照。修改或删除模板不会改变已创建实例的指令；重启也保留快照。普通重命名不会刷新快照；显式选择另一个模板才更新，随后用 `b` 或 `brief send` 发送新说明。自由文本 `--role` 仍可使用。完整 brief 仍限 2 KiB。
+
+账号 `env` 支持原有字符串，以及单一 `literal`、`env_ref`、`keychain_ref` 来源。引用在启动时解析，解析结果不写回配置。macOS 钥匙串通过 `/usr/bin/security` 读取已有项目；工作台不创建或修改钥匙串项。
+
+```json
+[{
+  "name": "gateway",
+  "endpoint": "compatible",
+  "env": {
+    "ANTHROPIC_BASE_URL": {"literal": "https://gateway.example"},
+    "ANTHROPIC_AUTH_TOKEN": {"env_ref": "WORK_GATEWAY_TOKEN"},
+    "OTHER_API_KEY": {"keychain_ref": {"service": "work-agent", "account": "me"}}
+  }
+}]
+```
+
+`endpoint` 可选 `official`、`compatible`、`custom`，省略时为 `official`。非官方端点在面板显示兼容性提示，这个标签不代表已验证接口、模型或认证方式。缺失环境变量或钥匙串项会阻止启动并返回不含凭据值的错误。
+
+### 单看、分屏与后台会话
+
+初次接入时单看第一个 pane。`Ctrl-a f` 打开切换器；`Ctrl-a |` 或 `Ctrl-a -` 选择另一个 pane，分别左右或上下分屏。拖动分隔线调整比例，窗口 resize 保留布局树的比例。`Ctrl-a z` 在单看与当前分屏之间切换。
+
+`Ctrl-a T` 新建视图 tab，`Ctrl-a {`／`Ctrl-a }` 切换，`Ctrl-a ,` 重命名，`Ctrl-a W` 关闭当前 tab。关闭 tab 不停止其中的进程。布局、tab 名称与驻留状态仅保留在当前 TUI 会话，detach 后重新接入从单看开始。
+
+Agents 页 `p` 驻留或打开 pane，`v` 查看最近 20 行；Enter 或 Graph 跳转会自动打开目标。后台进程持续运行，PTY 保持最后尺寸；只有当前可见 pane 会取整屏画面并 resize。状态栏显示 tab、焦点位置和后台／待处理数量；`Ctrl-a !` 跳到需要处理的 pane。进入可见视图时清除相关任务和报告的未读标记。
+
+Agents 列表显示输出摘要、最近活动、未读、就绪状态、端点类型及越权次数。创建表单提示同目录／Layer 和同账号运行实例；在选项字段按 `L` 先创建隔离 Layer，再返回表单。`ready` 表示当前投递闸门通过，不代表 agent 已收到或接手任务。
+
+`state.get` 的 `ids` 现在区分三种情况：省略或 `null` 获取全部画面，`[]` 仅取元数据，非空数组只取指定 pane；`frames: false` 始终禁止画面。`pane.peek` 返回文本尾部，不分配整屏 Frame。
 
 ## 协作 Graph
 
@@ -115,7 +157,11 @@ ACP pane 底部有常驻输入框，直接输入并按 Enter 即通过原任务�
 | `n` | 新建 shell |
 | `a` | 打开 Agents / Edges / Tasks / Layers 控制面板 |
 | `c` | 打开自定义 Agent 表单；命令按 argv 执行，不经过 shell |
-| `o` | 切换聚焦 pane |
+| `o` / `f` | 循环切换 pane／打开切换器 |
+| `\|` / `-` | 选择另一个 pane，左右／上下分屏 |
+| `T` / `{` / `}` | 新建／前一个／后一个视图 tab |
+| `,` / `W` | 重命名／关闭当前 tab，不停止进程 |
+| `!` | 打开下一个需要处理的 pane |
 | `s` | 切换网格、左右、上下布局 |
 | `z` | 放大当前 pane／恢复布局 |
 | `b` | 显示或隐藏任务栏 |
@@ -129,7 +175,7 @@ ACP pane 底部有常驻输入框，直接输入并按 Enter 即通过原任务�
 | `d` / `q` | detach，保留后台会话 |
 | `Ctrl-a` | 将原始 `Ctrl-a` 发送给当前终端，即连续按两次 |
 
-鼠标左键点击 pane 的标题或内容即可聚焦；按住分隔线拖动可调整大小，网格布局按整行、整列调整。调整比例在当前 TUI 中保留，切换布局或增减 pane 时恢复均分；放大再恢复不会丢失比例。弹窗打开时不响应鼠标聚焦和拖动。
+鼠标左键点击 pane 的标题或内容即可聚焦；按住分隔线拖动可调整对应布局树分支的比例。比例在当前 TUI 中保留，窗口 resize、放大再恢复均保留比例；切换排列方式会重新分配当前布局中的 pane。弹窗打开时不响应鼠标聚焦和拖动。
 
 在 pane 内容区按住左键拖选文字，松开后自动复制到 macOS 剪贴板；支持跨行、反向拖选及中文、emoji。选区固定当前可见画面，按 Esc 或再次点击恢复实时输出。选区限当前 pane 的可见内容，不跨 pane，也不自动滚屏。
 
@@ -214,7 +260,7 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 
 `notify` 只写报告收件箱，绝不写入目标终端，也不创建新任务。`handoff` 创建带 `ParentTask` 的新任务，继承父任务的 `From` 和当前 `Origin`，并经过正常投递。授权始终按原 `From` 检查；父任务 `To` 与报告 `From` 记录执行者。没有汇报目标时默认 `none`；指定 `ReportTo` 而未指定模式时默认 `notify`。
 
-汇报目标需要原发送方到目标的授权边，创建和完成时都会检查。撤销授权后报告为 `undeliverable`，摘要仍保存供处理。报告和完成状态一起持久化，同一原任务只生成一份报告。摘要最多 4KiB，不提供 `ReportMode: full`；完整结果仍只允许原任务收发双方及 controller 读取。
+汇报目标需要原发送方到目标的授权边，创建和完成时都会检查。撤销授权后报告为 `undeliverable`，摘要仍保存供处理。报告和完成状态一起持久化，同一原任务只生成一份报告。`unknown` 或 `cancelled` 会写入状态通知，绝不触发 handoff；迟到的真实结果更新同一报告并恢复未读，首次最终结果最多触发一次 handoff。报告的 `task_state` 区分未知、取消与最终结果。摘要最多 4KiB，不提供 `ReportMode: full`；完整结果仍只允许原任务收发双方及 controller 读取。
 
 ### 人工处理
 
@@ -232,6 +278,8 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 
 排队任务直接取消；ACP 等待协议确认。注入任务先发送中断，进入 `cancelling`，再由人确认 `cancelled`。终端历史和已发生的文件操作不会被撤销。旧 claim 模式的执行中 PTY 任务仍不能可靠取消，需要检查或停止 pane。
 
+`wtable audit` 返回最近 256 条越权拒绝记录，只包含调用者、目标、方法与时间；每个 pane 的累计次数保存在元数据中。记录不包含请求正文或凭据。直接边检查已阻止 agent 向自身派活；目前没有内容来源追踪或 `--no-relay` 模式。
+
 连线限制工作台 API，不限制同一系统用户直接访问文件。worktree 用于隔离工作目录，不是操作系统沙箱。
 
 ## Git worktree
@@ -248,7 +296,7 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 
 ## 升级、恢复与诊断
 
-当前版本为 `0.3.0`。CLI 会检查 daemon 版本，不会把新投递参数交给旧 daemon 静默忽略。保留旧会话时，请为新版使用独立的 `WTABLE_HOME`；需要沿用原目录时，先结束旧会话并执行 `shutdown`，再启动新版。仅重新 attach 不会升级后台 daemon，`shutdown` 会停止该目录下的全部 pane。
+当前版本为 `0.4.0`。CLI 会检查 daemon 版本，不会把新投递参数交给旧 daemon 静默忽略。保留旧会话时，请为新版使用独立的 `WTABLE_HOME`；需要沿用原目录时，先结束旧会话并执行 `shutdown`，再启动新版。仅重新 attach 不会升级后台 daemon，`shutdown` 会停止该目录下的全部 pane。
 
 ```sh
 ./bin/wtable diag
@@ -271,6 +319,8 @@ go build -o bin/wtable ./cmd/wtable
 python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.json
 python3 scripts/p0_smoke.py --binary bin/wtable --output .dev/test-results/p0.json
 python3 scripts/p1_smoke.py --binary bin/wtable --output .dev/test-results/p1.json
+python3 scripts/p2_smoke.py --binary bin/wtable --output .dev/test-results/p2.json
+python3 scripts/view_smoke.py --binary bin/wtable --output .dev/test-results/view.json
 ```
 
 smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授权、任务去重、审批文件效果、worktree 隔离与崩溃恢复。ACP 部分使用本地确定性 fixture，不调用外部模型。测试会清理自建的进程和临时目录，并保留 JSON 验收报告。
@@ -283,8 +333,8 @@ smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授�
 - 回滚保存最多 10,000 个物理行；改变宽度不会重新排版历史。未完成全面 VT conformance。
 - 使用完整 cell 快照轮询，尚未实现 cell 差分与事件重放；原计划中的性能预算尚未验收。
 - 支持可见内容的鼠标选区复制、键盘回看和复制可见屏；支持向启用鼠标协议的应用转发滚轮，暂不转发点击和拖动，也不支持 OSC 52 剪贴板协议。
-- pane 的排列、大小比例、焦点和 zoom 属于当前 TUI 状态，detach 后会按已有 pane 重新布局。
+- pane 的布局树、tabs、大小比例、焦点、驻留和 zoom 属于当前 TUI 状态，detach 后从单看开始。
 - 最多保留 32 个 pane、2,000 条任务；pane 可从 Agents 页移除，任务历史尚无清理命令。结构化聊天视图有大小上限，完整任务结果单独保存。
-- notes、角色管理、内置编辑器、账号池、计划任务、图片和浏览器门户属于后续范围。
+- notes、内置编辑器、账号池、计划任务、图片和浏览器门户属于后续范围。
 
 当前实现完成 P0 送达与回传、P1 控制面板和身份说明接入，以及 P2 Graph v1。`docs/`、`.dev/` 和 `bin/` 均由 Git 白名单规则忽略。

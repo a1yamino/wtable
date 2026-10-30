@@ -62,41 +62,53 @@ type Preset struct {
 }
 
 type Catalog struct {
-	Presets  []Preset `json:"presets"`
-	Accounts []string `json:"accounts"`
+	Roles           []RoleTemplate `json:"roles"`
+	AccountProfiles []AccountInfo  `json:"account_profiles"`
+	Presets         []Preset       `json:"presets"`
+	Accounts        []string       `json:"accounts"`
 }
 
 type PaneUpdate struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Role    string `json:"role"`
-	Account string `json:"account"`
+	RoleTemplate *string `json:"role_template,omitempty"`
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Role         string  `json:"role"`
+	Account      string  `json:"account"`
 }
 
 type Pane struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	Backend        string         `json:"backend"` // pty or acp
-	Command        []string       `json:"command"`
-	Cwd            string         `json:"cwd"`
-	State          string         `json:"state"` // starting, running, exited, failed, interrupted
-	TurnState      string         `json:"turn_state,omitempty"`
-	SessionID      string         `json:"session_id,omitempty"`
-	Preset         string         `json:"preset,omitempty"`
-	Role           string         `json:"role,omitempty"`
-	Account        string         `json:"account,omitempty"`
-	Layer          string         `json:"layer,omitempty"`
-	InjectBrief    bool           `json:"inject_brief,omitempty"`
-	BriefPath      string         `json:"brief_path,omitempty"`
-	BriefTask      string         `json:"brief_task,omitempty"`
-	ExitSummary    string         `json:"exit_summary,omitempty"`
-	LogPath        string         `json:"log_path,omitempty"`
-	Error          string         `json:"error,omitempty"`
-	ExitCode       *int           `json:"exit_code,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	Messages       []Message      `json:"messages,omitempty"`
-	Frame          *Frame         `json:"frame,omitempty"`
-	DeliveryConfig DeliveryConfig `json:"delivery_config,omitempty"`
+	RoleTemplate     string         `json:"role_template,omitempty"`
+	RoleInstructions string         `json:"role_instructions,omitempty"`
+	RoleHash         string         `json:"role_hash,omitempty"`
+	Endpoint         string         `json:"endpoint,omitempty"`
+	LastOutput       string         `json:"last_output,omitempty"`
+	LastActivity     time.Time      `json:"last_activity,omitempty"`
+	Readiness        string         `json:"readiness,omitempty"`
+	ReadinessReason  string         `json:"readiness_reason,omitempty"`
+	DeniedCount      int            `json:"denied_count,omitempty"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name"`
+	Backend          string         `json:"backend"` // pty or acp
+	Command          []string       `json:"command"`
+	Cwd              string         `json:"cwd"`
+	State            string         `json:"state"` // starting, running, exited, failed, interrupted
+	TurnState        string         `json:"turn_state,omitempty"`
+	SessionID        string         `json:"session_id,omitempty"`
+	Preset           string         `json:"preset,omitempty"`
+	Role             string         `json:"role,omitempty"`
+	Account          string         `json:"account,omitempty"`
+	Layer            string         `json:"layer,omitempty"`
+	InjectBrief      bool           `json:"inject_brief,omitempty"`
+	BriefPath        string         `json:"brief_path,omitempty"`
+	BriefTask        string         `json:"brief_task,omitempty"`
+	ExitSummary      string         `json:"exit_summary,omitempty"`
+	LogPath          string         `json:"log_path,omitempty"`
+	Error            string         `json:"error,omitempty"`
+	ExitCode         *int           `json:"exit_code,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	Messages         []Message      `json:"messages,omitempty"`
+	Frame            *Frame         `json:"frame,omitempty"`
+	DeliveryConfig   DeliveryConfig `json:"delivery_config,omitempty"`
 }
 
 type Edge struct {
@@ -164,6 +176,7 @@ type SendParams struct {
 }
 
 type Report struct {
+	TaskState   string    `json:"task_state,omitempty"`
 	ID          string    `json:"id"`
 	ParentTask  string    `json:"parent_task"`
 	From        string    `json:"from"`
@@ -209,6 +222,7 @@ type Snapshot struct {
 }
 
 type SpawnParams struct {
+	RoleTemplate   string         `json:"role_template,omitempty"`
 	Preset         string         `json:"preset,omitempty"`
 	Role           string         `json:"role,omitempty"`
 	Account        string         `json:"account,omitempty"`
@@ -222,4 +236,23 @@ type SpawnParams struct {
 	Cols           int            `json:"cols"`
 	Rows           int            `json:"rows"`
 	DeliveryConfig DeliveryConfig `json:"delivery_config,omitempty"`
+}
+
+// RoleTemplate defaults apply only when the caller leaves a value unspecified.
+type RoleTemplate struct {
+	Name         string `json:"name"`
+	Instructions string `json:"instructions"`
+	Preset       string `json:"preset,omitempty"`
+	Backend      string `json:"backend,omitempty"`
+	Cwd          string `json:"cwd,omitempty"`
+}
+type AccountInfo struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+}
+type DeniedEvent struct {
+	From   string    `json:"from"`
+	To     string    `json:"to,omitempty"`
+	Method string    `json:"method"`
+	At     time.Time `json:"at"`
 }

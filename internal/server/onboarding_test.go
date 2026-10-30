@@ -149,7 +149,7 @@ func TestPaneUpdateRemoveAndControllerBoundary(t *testing.T) {
 	if len(s.state.Tasks) != 4 || p.BriefTask != "" {
 		t.Fatal("metadata edit reinjected brief")
 	}
-	for _, method := range []string{"preset.list", "pane.spawn", "pane.update", "pane.remove", "pane.brief", "pane.brief.send", "edge.add"} {
+	for _, method := range []string{"preset.list", "pane.spawn", "pane.update", "pane.remove", "pane.brief", "pane.brief.send", "role.list", "role.put", "role.delete", "edge.add"} {
 		if _, err := s.dispatch(connection{principal: "worker"}, method, rawTask(map[string]string{"id": "peer"})); err == nil {
 			t.Fatalf("peer can invoke %s", method)
 		}
@@ -225,5 +225,157 @@ func TestSpawnValidationAndBriefQueueRestart(t *testing.T) {
 func TestDiagnosticRedactsWrappedCredentials(t *testing.T) {
 	if got := redactDiagnostic("before token-123\n456 after", "token-123456"); got != "before [REDACTED] after" {
 		t.Fatal(got)
+	}
+}
+
+func TestAccountCredentialReferences(t *testing.T) {
+	s := onboardingServer(t)
+	t.Setenv("WTABLE_TEST_PROFILE_SECRET", "reference-value-do-not-expose")
+	path := filepath.Join(s.paths.Home, "accounts.json")
+	data := `[{"name":"gateway","endpoint":"compatible","env":{"LITERAL_OLD":"old-value","LITERAL_NEW":{"literal":"new-value"},"API_TOKEN":{"env_ref":"WTABLE_TEST_PROFILE_SECRET"}}}]`
+	// References to Worktable's own reserved variables are not permitted.
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.accountEnv("gateway"); err == nil {
+		t.Fatal("reserved source reference accepted")
+	}
+	t.Setenv("AGENT_TEST_PROFILE_SECRET", "reference-value-do-not-expose")
+	data = strings.ReplaceAll(data, "WTABLE_TEST_PROFILE_SECRET", "AGENT_TEST_PROFILE_SECRET")
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := s.accountEnv("gateway")
+	if err != nil || env["API_TOKEN"] != "reference-value-do-not-expose" || env["LITERAL_OLD"] != "old-value" || env["LITERAL_NEW"] != "new-value" {
+		t.Fatalf("reference resolution failed: %v", err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	catalog, err := s.catalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(catalog)
+	for _, private := range []string{"reference-value-do-not-expose", "AGENT_TEST_PROFILE_SECRET", "API_TOKEN", "old-value", "new-value"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("catalog leaks credential data %q", private)
+		}
+	}
+	if len(catalog.AccountProfiles) != 1 || catalog.AccountProfiles[0].Endpoint != "compatible" {
+		t.Fatalf("missing endpoint metadata: %+v", catalog.AccountProfiles)
+	}
+	t.Setenv("AGENT_TEST_PROFILE_SECRET", "")
+	if _, err := s.accountEnv("gateway"); err == nil || !strings.Contains(err.Error(), "env_ref") || strings.Contains(err.Error(), "AGENT_TEST_PROFILE_SECRET") {
+		t.Fatalf("missing reference not safely explained: %v", err)
+	}
+	data = `[{"name":"keychain","env":{"API_TOKEN":{"keychain_ref":{"service":"wtable-test-missing-service-857328510","account":"missing"}}}}]`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.accountEnv("keychain"); err == nil || !strings.Contains(err.Error(), "keychain_ref") || strings.Contains(err.Error(), "857328510") {
+		t.Fatalf("keychain failure not safely explained: %v", err)
+	}
+	for _, value := range []string{`null`, `{"env_ref":"A","literal":"leak"}`, `{"unknown":"leak"}`} {
+		data = `[{"name":"invalid","env":{"TOKEN":` + value + `}}]`
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.accountEnv("invalid"); err == nil || strings.Contains(err.Error(), "leak") {
+			t.Fatalf("invalid credential source accepted or exposed: %s %v", value, err)
+		}
+	}
+}
+
+func TestRoleSnapshotSurvivesTemplateUpdatesAndBriefReads(t *testing.T) {
+	s := onboardingServer(t)
+	role := model.RoleTemplate{Name: "reviewer", Instructions: "Review correctness and report concrete evidence.", Preset: "shell", Backend: "pty", Cwd: s.paths.Home}
+	if _, err := s.putRole(role); err != nil {
+		t.Fatal(err)
+	}
+	roles, err := s.roles()
+	if err != nil || len(roles) != 1 || roles[0] != role {
+		t.Fatalf("role round trip: %+v %v", roles, err)
+	}
+	defaults := model.SpawnParams{RoleTemplate: role.Name}
+	if _, err := s.resolveRole(&defaults); err != nil || defaults.Preset != "shell" || defaults.Backend != "pty" || defaults.Cwd != s.paths.Home {
+		t.Fatalf("role defaults not applied: %+v %v", defaults, err)
+	}
+	explicit := model.SpawnParams{RoleTemplate: role.Name, Preset: "codex-acp"}
+	if _, err := s.resolveRole(&explicit); err != nil || explicit.Backend != "" {
+		t.Fatalf("role backend overrode explicit preset: %+v %v", explicit, err)
+	}
+	p, err := s.spawn(model.SpawnParams{Name: "review", RoleTemplate: role.Name, Command: []string{"/bin/cat"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.removePane(p.ID)
+	if p.RoleTemplate != role.Name || p.Role != role.Name || p.RoleInstructions != role.Instructions || p.RoleHash != roleHash(role.Instructions) {
+		t.Fatalf("missing role snapshot: %+v", p)
+	}
+	originalHash := p.RoleHash
+	role.Instructions = "CHANGED_TEMPLATE_MUST_NOT_REACH_RUNNING_PANE"
+	if _, err := s.putRole(role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.paneBrief(p.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	// Saving a metadata edit with the same selected template must not refresh it.
+	if _, err := s.updatePane(model.PaneUpdate{ID: p.ID, Name: p.Name, Role: p.Role, RoleTemplate: &p.RoleTemplate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.deleteRole(role.Name); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy edit clients omit role_template when renaming a pane. Omission
+	// must preserve its startup snapshot even after the template is deleted.
+	renamed, err := s.updatePane(model.PaneUpdate{ID: p.ID, Name: "renamed-review", Role: p.Role})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Name != "renamed-review" || renamed.RoleTemplate != p.RoleTemplate || renamed.RoleInstructions != p.RoleInstructions || renamed.RoleHash != originalHash {
+		t.Fatalf("omitted role_template erased startup snapshot: %+v", renamed)
+	}
+	if _, err := s.paneBrief(p.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.stop(p.ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		state := s.paneLocked(p.ID).State
+		s.mu.Unlock()
+		if state == "exited" || state == "failed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("role fixture stop timed out")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := s.dispatch(connection{principal: "controller"}, "pane.restart", rawTask(map[string]string{"id": p.ID})); err != nil {
+		t.Fatalf("deleted role prevented restart: %v", err)
+	}
+	s.mu.Lock()
+	stored := clonePane(*s.paneLocked(p.ID))
+	s.mu.Unlock()
+	text, err := os.ReadFile(stored.BriefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.RoleHash != originalHash || stored.RoleInstructions != p.RoleInstructions || strings.Contains(string(text), "CHANGED_TEMPLATE") || !strings.Contains(string(text), p.RoleInstructions) {
+		t.Fatalf("brief/template operation mutated startup snapshot: %s", text)
+	}
+	freeRole := ""
+	cleared, err := s.updatePane(model.PaneUpdate{ID: p.ID, Name: stored.Name, Role: "Free text", RoleTemplate: &freeRole})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Role != "Free text" || cleared.RoleTemplate != "" || cleared.RoleInstructions != "" || cleared.RoleHash != "" {
+		t.Fatalf("explicit empty role_template did not select free text: %+v", cleared)
+	}
+	if _, err := s.putRole(model.RoleTemplate{Name: "../escape"}); err == nil {
+		t.Fatal("role path traversal accepted")
 	}
 }

@@ -111,6 +111,14 @@ func Run(ctx context.Context, paths config.Paths) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s := &Server{paths: paths, db: db, state: state, token: token, peerTokens: map[string]string{}, runs: map[string]string{}, terminals: map[string]*terminal.Terminal{}, agents: map[string]*agent.Client{}, approvals: map[string]*approval{}, ctx: ctx, cancel: cancel, connections: map[net.Conn]struct{}{}, paneCancels: map[string]context.CancelFunc{}, taskCancels: map[string]context.CancelFunc{}}
+	for i := range s.state.Tasks {
+		if s.state.Tasks[i].State == "unknown" || s.state.Tasks[i].State == "cancelled" {
+			s.completeReportLocked(&s.state.Tasks[i])
+		}
+	}
+	if err = s.saveLocked(); err != nil {
+		return err
+	}
 	if err = os.Remove(paths.Socket); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -354,7 +362,7 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Reports: append([]model.Report{}, s.state.Reports...), Layers: append([]model.Layer{}, s.state.Layers...)}
 	terms := map[string]*terminal.Terminal{}
 	for _, p := range s.state.Panes {
-		result.Panes = append(result.Panes, clonePane(p))
+		result.Panes = append(result.Panes, s.paneMetadataLocked(p))
 		if t := s.terminals[p.ID]; t != nil {
 			terms[p.ID] = t
 		}
@@ -374,7 +382,7 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 	if args.Frames == nil || *args.Frames {
 		for i := range result.Panes {
 			p := &result.Panes[i]
-			if len(args.IDs) > 0 && !contains(args.IDs, p.ID) {
+			if args.IDs != nil && !contains(args.IDs, p.ID) {
 				continue
 			}
 			if t := terms[p.ID]; t != nil {
@@ -402,10 +410,11 @@ func contains(values []string, s string) bool {
 	return false
 }
 
-func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any, error) {
+func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (result any, err error) {
+	defer func() { err = s.auditDenied(c.principal, method, raw, err) }()
 	controller := c.principal == "controller"
 	if !controller && !contains([]string{"diag.info", "peer.list", "task.send", "task.next", "task.result", "task.ack", "task.get", "task.list", "task.seen", "report.list", "report.get", "report.seen"}, method) {
-		return nil, errors.New("此操作需要人类控制端权限")
+		return nil, deniedError("此操作需要人类控制端权限")
 	}
 	switch method {
 	case "diag.info":
@@ -432,6 +441,28 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any
 		return true, nil
 	case "state.get":
 		return s.snapshot(raw)
+	case "audit.list":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return append([]model.DeniedEvent{}, s.state.Denied...), nil
+	case "role.list":
+		return s.roles()
+	case "role.put":
+		var role model.RoleTemplate
+		if err := decode(raw, &role); err != nil {
+			return nil, err
+		}
+		return s.putRole(role)
+	case "role.delete":
+		var args struct {
+			Name string `json:"name"`
+		}
+		if err := decode(raw, &args); err != nil {
+			return nil, err
+		}
+		return true, s.deleteRole(args.Name)
+	case "pane.peek":
+		return s.peek(raw)
 	case "preset.list":
 		return s.catalog()
 	case "pane.update":

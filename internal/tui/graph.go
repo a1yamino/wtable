@@ -265,10 +265,8 @@ func (u *ui) graphKey(e *tcell.EventKey) {
 	if e.Key() == tcell.KeyEnter {
 		for i, p := range u.snapshot.Panes {
 			if p.ID == v.node {
-				u.focus = i
-				u.zoom = true
 				u.graph = nil
-				u.resize()
+				u.openPane(u.snapshot.Panes[i].ID, true)
 				_, _ = u.refresh()
 				return
 			}

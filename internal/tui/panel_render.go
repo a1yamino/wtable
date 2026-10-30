@@ -33,7 +33,7 @@ func (u *ui) drawPanel() {
 		return
 	}
 	if p.preview != "" {
-		lines = []string{"身份说明 / 诊断 · ↑↓/PgUp/PgDn 滚动 · Esc 返回"}
+		lines = []string{"查看输出 / 身份说明 / 诊断 · ↑↓/PgUp/PgDn 滚动 · Esc 返回"}
 		var body []string
 		for _, line := range strings.Split(p.preview, "\n") {
 			body = append(body, wrap(line, width)...)
@@ -46,6 +46,8 @@ func (u *ui) drawPanel() {
 	if p.confirmKind != "" {
 		if p.confirmKind == "pane" {
 			lines = append(lines, "移除 "+u.paneName(p.confirmID)+"？进程将停止，相关排队任务会取消。", "任务、报告和身份说明历史保留。")
+		} else if p.confirmKind == "role" {
+			lines = append(lines, "删除角色模板 "+p.confirmID+"？已运行实例的角色快照保持不变。")
 		} else {
 			var e model.Edge
 			_ = json.Unmarshal([]byte(p.confirmID), &e)
@@ -56,7 +58,7 @@ func (u *ui) drawPanel() {
 		return
 	}
 	if p.form != "" {
-		title := map[string]string{"agent": "添加 Agent", "edit": "编辑 Agent（命令和目录变更请重新创建）", "send": "派发任务", "edge": "添加单向授权边", "layer": "创建 Git Layer"}[p.form]
+		title := map[string]string{"agent": "添加 Agent", "edit": "编辑 Agent（命令和目录变更请重新创建）", "send": "派发任务", "edge": "添加单向授权边", "layer": "创建 Git Layer", "role": "编辑角色模板（启动时快照指令）"}[p.form]
 		lines = append(lines, title+" · Tab 切字段 · ←→ 选项 · Space 多选 · Enter 提交")
 		start := max(0, p.field-capacity+1)
 		for i := start; i < min(len(p.fields), start+capacity); i++ {
@@ -113,6 +115,12 @@ func (u *ui) drawPanel() {
 		}
 		lines = append(lines, fmt.Sprintf("字段 %d/%d · Esc 取消 · 任务文本支持 Alt-Enter 换行", p.field+1, len(p.fields)))
 		if p.form == "agent" {
+			lines = append(lines, u.conflictWarnings(p.get("cwd").value(), p.get("layer").value(), p.get("account").value())...)
+			for _, account := range p.catalog.AccountProfiles {
+				if account.Name == p.get("account").value() && account.Endpoint != "" && account.Endpoint != "official" {
+					lines = append(lines, "非官方端点 "+account.Endpoint+"：工具调用 / 流式可能降级")
+				}
+			}
 			for _, preset := range p.catalog.Presets {
 				if preset.ID == p.get("preset").value() {
 					lines = append(lines, preset.Version+" · "+preset.Detail)
@@ -123,8 +131,22 @@ func (u *ui) drawPanel() {
 		u.modal(lines)
 		return
 	}
-	actions := []string{"a 添加 · e 编辑 · d 移除 · Enter 跳转 · v 说明 · b 重发说明 · l 诊断 · R 重启", "a 添加边 · x 删除边 · t 当前 pane 过滤（人类能力不作为可删边）", "s 派活 · Enter 详情 · r 重发 · x 取消 · b 报告收件箱", "n 新建 Layer · Enter 设为新 pane 默认目录"}
+	if p.roleView {
+		u.drawRoles()
+		return
+	}
+	actions := []string{"a 添加 · e 编辑 · d 移除 · Enter 单看 · p 驻留 · v peek · b 重发 · B 说明 · O 角色库", "a 添加边 · x 删除边 · t 当前 pane 过滤（人类能力不作为可删边）", "s 派活 · Enter 详情 · r 重发 · x 取消 · b 报告收件箱", "n 新建 Layer · Enter 设为新 pane 默认目录"}
 	lines = append(lines, actions[p.tab])
+	if p.tab == 0 && len(u.snapshot.Panes) > 0 {
+		selected := u.snapshot.Panes[min(p.selected, len(u.snapshot.Panes)-1)]
+		lines = append(lines, "输出："+truncateColumns(selected.LastOutput, 80), "活动："+selected.LastActivity.Local().Format("15:04:05")+" · 就绪："+selected.Readiness+" · "+selected.ReadinessReason,
+			fmt.Sprintf("账号：%s · 端点：%s · 越权尝试 %d 次 · Role：%s", selected.Account, selected.Endpoint, selected.DeniedCount, selected.Role))
+		lines = append(lines, u.conflictWarnings(selected.Cwd, selected.Layer, selected.Account)...)
+		if selected.Endpoint != "" && selected.Endpoint != "official" {
+			lines = append(lines, "非官方端点：工具调用 / 流式可能降级")
+		}
+		capacity = max(1, h-len(lines)-5)
+	}
 	var rows []string
 	switch p.tab {
 	case 0:
@@ -140,7 +162,7 @@ func (u *ui) drawPanel() {
 					}
 				}
 			}
-			rows = append(rows, fmt.Sprintf("%s · %s · %s · %s%s", pane.Name, pane.Backend, pane.State, pane.Account, brief))
+			rows = append(rows, u.agentSummary(pane)+brief)
 		}
 	case 1:
 		for _, e := range u.panelEdges() {
@@ -170,6 +192,7 @@ func (u *ui) drawPanel() {
 	}
 	p.selected = min(p.selected, max(0, len(rows)-1))
 	start := max(0, p.selected-capacity+1)
+	rowStart := len(lines)
 	for i := start; i < min(len(rows), start+capacity); i++ {
 		marker := "  "
 		if i == p.selected {
@@ -180,7 +203,7 @@ func (u *ui) drawPanel() {
 	if len(rows) == 0 {
 		lines = append(lines, "暂无条目")
 	}
-	top := (h-min(len(lines)+2, max(1, h-2)))/2 + 3
+	top := (h-min(len(lines)+2, max(1, h-2)))/2 + 1 + rowStart
 	for i := start; i < min(len(rows), start+capacity); i++ {
 		p.rows[top+i-start] = i
 	}

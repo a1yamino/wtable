@@ -45,6 +45,8 @@ func (s *Server) edge(method string, raw json.RawMessage) (any, error) {
 				t.State = "cancelled"
 				t.Result = "授权连线已移除"
 				t.UpdatedAt = time.Now()
+				t.Seen = false
+				s.completeReportLocked(t)
 			}
 		}
 	}
@@ -119,7 +121,7 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 		return model.Task{}, errors.New("目标 pane 不存在")
 	}
 	if principal != "controller" && !s.hasEdgeLocked(principal, p.ID) {
-		return model.Task{}, errors.New("没有发送到此 pane 的授权连线")
+		return model.Task{}, deniedError("没有发送到此 pane 的授权连线", p.ID)
 	}
 	a.To = p.ID
 	if a.DeliveryMode == "" {
@@ -153,13 +155,13 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 		}
 		a.ReportTo = recipient.ID
 		if principal != "controller" && !s.hasEdgeLocked(principal, recipient.ID) {
-			return model.Task{}, errors.New("没有发送到 report_to 的授权连线")
+			return model.Task{}, deniedError("没有发送到 report_to 的授权连线", recipient.ID)
 		}
 	}
 	if a.ParentTask != "" {
 		parent := s.taskLocked(a.ParentTask)
 		if parent == nil || (principal != "controller" && parent.From != principal && parent.To != principal) {
-			return model.Task{}, errors.New("无权引用 parent_task")
+			return model.Task{}, deniedError("无权引用 parent_task")
 		}
 	}
 	if a.DedupeKey != "" {
@@ -195,7 +197,7 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 
 func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
 	if principal == "controller" {
-		return nil, errors.New("next 必须在接收任务的 pane 内运行")
+		return nil, deniedError("next 必须在接收任务的 pane 内运行")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -246,7 +248,7 @@ func (s *Server) finishTask(principal string, raw json.RawMessage, manual bool) 
 		return nil, errors.New("任务不存在")
 	}
 	if (!manual && t.To != principal) || (manual && principal != "controller") {
-		return nil, errors.New("只有接收 pane 可以提交结果；人工完成需要控制端")
+		return nil, deniedError("只有接收 pane 可以提交结果；人工完成需要控制端")
 	}
 	if t.State == "completed" {
 		return nil, errors.New("任务已经完成，结果不能覆盖")
@@ -288,7 +290,7 @@ func (s *Server) getTasks(principal, method string, raw json.RawMessage) (any, e
 			return nil, errors.New("任务不存在")
 		}
 		if principal != "controller" && t.From != principal && t.To != principal {
-			return nil, errors.New("无权读取任务")
+			return nil, deniedError("无权读取任务")
 		}
 		return *t, nil
 	}
@@ -380,9 +382,8 @@ func (s *Server) runQueue(paneID string) {
 				t.Result = "结果超过 1 MiB，已截断：\n" + t.Result
 			}
 			t.UpdatedAt = time.Now()
-			if t.State == "completed" || t.State == "failed" {
-				s.completeReportLocked(t)
-			}
+			t.Seen = false
+			s.completeReportLocked(t)
 		}
 		p = s.paneLocked(paneID)
 		if p != nil && s.runs[paneID] == runID && p.State == "running" {
@@ -436,7 +437,9 @@ func (s *Server) cancelTask(raw json.RawMessage) (any, error) {
 	}
 	t.Result = "用户请求取消；已发生的操作不会撤销"
 	t.UpdatedAt = time.Now()
+	t.Seen = false
 	cancel := s.taskCancels[t.ID]
+	s.completeReportLocked(t)
 	copy := *t
 	err := s.saveLocked()
 	s.mu.Unlock()

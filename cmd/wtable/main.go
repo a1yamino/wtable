@@ -163,6 +163,14 @@ func run(args []string) error {
 			fmt.Println("账号：" + strings.Join(catalog.Accounts, "、"))
 		}
 		return nil
+	case "role", "roles":
+		return roleCommand(args[1:], call)
+	case "audit":
+		var out []model.DeniedEvent
+		if err = call("audit.list", nil, &out); err != nil {
+			return err
+		}
+		return printJSON(out)
 	case "pane":
 		return paneCommand(args[1:], call)
 	case "remove":
@@ -196,6 +204,7 @@ func run(args []string) error {
 		backend := fs.String("backend", "", "pty 或 acp（默认使用预设后端，否则 pty）")
 		preset := fs.String("preset", "", "启动预设 ID")
 		role := fs.String("role", "", "角色说明")
+		roleTemplate := fs.String("role-template", "", "角色模板名称（创建时快照）")
 		account := fs.String("account", "", "已配置的账号名称")
 		brief := fs.Bool("brief", false, "通过任务通道注入接入说明")
 		var connectTo []string
@@ -227,6 +236,22 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		if *roleTemplate != "" && *layer == "" {
+			dirSet := false
+			fs.Visit(func(f *flag.Flag) { dirSet = dirSet || f.Name == "dir" })
+			if !dirSet {
+				var roles []model.RoleTemplate
+				if err = call("role.list", nil, &roles); err != nil {
+					return err
+				}
+				for _, template := range roles {
+					if template.Name == *roleTemplate && template.Cwd != "" {
+						abs = ""
+						break
+					}
+				}
+			}
+		}
 		if *layer != "" {
 			dirSet := false
 			fs.Visit(func(f *flag.Flag) { dirSet = dirSet || f.Name == "dir" })
@@ -235,14 +260,14 @@ func run(args []string) error {
 			}
 		}
 		command := fs.Args()
-		if len(command) == 0 && *preset == "" && args[0] == "recruit" {
+		if len(command) == 0 && *preset == "" && *roleTemplate == "" && args[0] == "recruit" {
 			return errors.New("recruit 需要 --preset ID 或 -- 后的 agent 启动命令")
 		}
 		var p model.Pane
 		spawnCtx, stop := context.WithTimeout(ctx, 45*time.Second)
 		defer stop()
 		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24,
-			Preset: *preset, Role: *role, Account: *account, Layer: *layer, InjectBrief: *brief, ConnectTo: connectTo, DeliveryConfig: model.DeliveryConfig{
+			Preset: *preset, Role: *role, RoleTemplate: *roleTemplate, Account: *account, Layer: *layer, InjectBrief: *brief, ConnectTo: connectTo, DeliveryConfig: model.DeliveryConfig{
 				BlockedRegex: *blockedRegex, TailLines: *tailLines, SettleMS: int(settle.Milliseconds()),
 				VerifyMS: int(verify.Milliseconds()), AckTimeoutMS: int(ackTimeout.Milliseconds()),
 			}}, &p)
@@ -556,6 +581,7 @@ func paneCommand(args []string, call func(string, any, any) error) error {
 	fs := flag.NewFlagSet("pane edit", flag.ContinueOnError)
 	name := fs.String("name", "", "pane 名称")
 	role := fs.String("role", "", "角色说明（空字符串清除）")
+	roleTemplate := fs.String("role-template", "", "角色模板（空字符串切换为自由角色）")
 	account := fs.String("account", "", "已配置的账号名称（空字符串清除）")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -595,6 +621,8 @@ func paneCommand(args []string, call func(string, any, any) error) error {
 			update.Name = *name
 		case "role":
 			update.Role = *role
+		case "role-template":
+			update.RoleTemplate = roleTemplate
 		case "account":
 			update.Account = *account
 		}
@@ -826,6 +854,8 @@ const help = `wtable 0.3.0 — macOS 终端 Agent 工作台
   wtable cancel [--confirmed] TASK         请求取消；PTY 中断后需人工确认已停止
     --confirmed 仅表示人工已确认 PTY 工作停止，不自动确认
   wtable reports | report ID | report seen ID  报告收件箱、详情、已读
+  wtable role list | put [OPTIONS] NAME FILE | delete NAME   角色模板
+  wtable audit                            最近越权拒绝记录（最多 256 条）
   wtable permissions                      查看待审批操作及选项 ID
   wtable approve REQUEST OPTION           明确选择权限选项
 

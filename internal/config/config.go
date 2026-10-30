@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 type Paths struct{ Home, Socket, Token, Database, Log string }
 

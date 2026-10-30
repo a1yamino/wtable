@@ -25,23 +25,47 @@ func reportSummary(text string) string {
 // Called under the same state lock and Save as completion. Appending a handoff
 // may reallocate Tasks, so callers must reacquire task pointers afterwards.
 func (s *Server) completeReportLocked(t *model.Task) {
-	if t.OnComplete == "" || t.OnComplete == "none" || t.ReportID != "" {
+	if t.OnComplete == "" || t.OnComplete == "none" || !contains([]string{"unknown", "cancelled", "completed", "failed"}, t.State) {
 		return
 	}
 	id := "report:" + t.ID + ":1"
-	for _, r := range s.state.Reports {
-		if r.ID == id {
-			t.ReportID = id
-			return
+	index := -1
+	finalReported := false
+	r := model.Report{ID: id, ParentTask: t.ID, From: t.To, To: t.ReportTo, Mode: t.OnComplete, CreatedAt: time.Now()}
+	for i, existing := range s.state.Reports {
+		if existing.ID == id {
+			index = i
+			r = existing
+			// Before task_state existed, reports were only created for final results.
+			finalReported = existing.TaskState == "" || existing.TaskState == "completed" || existing.TaskState == "failed" || existing.HandoffTask != ""
+			break
 		}
 	}
 	t.ReportID = id
-	r := model.Report{ID: id, ParentTask: t.ID, From: t.To, To: t.ReportTo, Mode: t.OnComplete, State: "delivered", Summary: reportSummary(t.Result), CreatedAt: time.Now()}
+	final := t.State == "completed" || t.State == "failed"
+	if finalReported && !final {
+		return
+	}
+	r.TaskState = t.State
+	r.State = "delivered"
+	r.Error = ""
+	r.Seen = false
+	summary := t.Result
+	if !final {
+		summary = fmt.Sprintf("任务状态：%s；尚无最终结果。", t.State)
+		if t.Result != "" {
+			summary += "\n" + t.Result
+		}
+		if t.DeliveryError != "" {
+			summary += "\n" + t.DeliveryError
+		}
+	}
+	r.Summary = reportSummary(summary)
 	recipient := s.paneLocked(t.ReportTo)
 	if recipient == nil || (t.From != "controller" && !s.hasEdgeLocked(t.From, t.ReportTo)) {
 		r.State = "undeliverable"
 		r.Error = "报告目标不存在或原发送方的授权连线已撤销"
-	} else if t.OnComplete == "handoff" {
+	} else if t.OnComplete == "handoff" && final && !finalReported {
 		if len(s.state.Tasks) >= 2000 {
 			r.State = "undeliverable"
 			r.Error = "任务记录已达上限"
@@ -62,7 +86,11 @@ func (s *Server) completeReportLocked(t *model.Task) {
 			}
 		}
 	}
-	s.state.Reports = append(s.state.Reports, r)
+	if index < 0 {
+		s.state.Reports = append(s.state.Reports, r)
+	} else {
+		s.state.Reports[index] = r
+	}
 }
 
 func (s *Server) reports(principal, method string, raw json.RawMessage) (any, error) {
@@ -85,11 +113,11 @@ func (s *Server) reports(principal, method string, raw json.RawMessage) (any, er
 				continue
 			}
 			if !visible(*r) {
-				return nil, errors.New("无权读取报告")
+				return nil, deniedError("无权读取报告")
 			}
 			if method == "report.seen" {
 				if principal != "controller" && principal != r.To {
-					return nil, errors.New("只有报告接收方可以标记已读")
+					return nil, deniedError("只有报告接收方可以标记已读")
 				}
 				r.Seen = true
 				return *r, s.saveLocked()
@@ -123,7 +151,7 @@ func (s *Server) taskMark(principal, method string, raw json.RawMessage) (any, e
 	switch method {
 	case "task.ack":
 		if principal != t.To {
-			return nil, errors.New("只有接收 pane 可以 ack")
+			return nil, deniedError("只有接收 pane 可以 ack")
 		}
 		if t.State == "accepted" {
 			return *t, nil
@@ -138,7 +166,7 @@ func (s *Server) taskMark(principal, method string, raw json.RawMessage) (any, e
 		t.DeliveryError = ""
 	case "task.confirm":
 		if principal != "controller" {
-			return nil, errors.New("人工确认需要控制端")
+			return nil, deniedError("人工确认需要控制端")
 		}
 		if taskMode(*t) != "inject" || (t.State != "delivered" && t.State != "unknown") {
 			return nil, errors.New("任务当前不能确认投递")
@@ -147,7 +175,7 @@ func (s *Server) taskMark(principal, method string, raw json.RawMessage) (any, e
 		t.DeliveryError = ""
 	case "task.seen":
 		if principal != "controller" && principal != t.From && principal != t.To {
-			return nil, errors.New("无权读取任务")
+			return nil, deniedError("无权读取任务")
 		}
 		t.Seen = true
 	}
@@ -201,14 +229,26 @@ func (s *Server) retryTask(raw json.RawMessage) (any, error) {
 	defer lane.Unlock()
 	s.mu.Lock()
 	original = s.taskLocked(old.ID)
-	priorState := original.State
+	priorTask := *original
+	var priorReports []model.Report
+	reportedUnknown := false
 	if original.DeliveryStatus == "write-unconfirmed" && original.State == "delivered" {
+		// createTaskLocked persists the retry and this status report together.
+		// Restore both if validation rejects the retry.
+		priorReports = append([]model.Report(nil), s.state.Reports...)
 		original.State = "unknown"
+		original.UpdatedAt = time.Now()
+		original.Seen = false
+		s.completeReportLocked(original)
+		reportedUnknown = true
 	}
 	t, err := s.createTaskLocked(old.From, params, old.ID)
 	if err != nil {
 		original = s.taskLocked(old.ID)
-		original.State = priorState
+		*original = priorTask
+		if reportedUnknown {
+			s.state.Reports = priorReports
+		}
 	}
 	s.mu.Unlock()
 	if err != nil {

@@ -21,11 +21,6 @@ import (
 
 const briefLimit = 2048
 
-type accountProfile struct {
-	Name string            `json:"name"`
-	Env  map[string]string `json:"env"`
-}
-
 // Configuration is explicit and local. Never infer profiles from agent credentials.
 func readOnboardingConfig(path string, value any) error {
 	f, err := os.Open(path)
@@ -51,42 +46,6 @@ func readOnboardingConfig(path string, value any) error {
 
 func validMetadata(value string, limit int) bool {
 	return utf8.ValidString(value) && len(value) <= limit && !strings.ContainsFunc(value, unicode.IsControl)
-}
-
-func (s *Server) accountProfiles() ([]accountProfile, error) {
-	profiles := []accountProfile{}
-	if err := readOnboardingConfig(filepath.Join(s.paths.Home, "accounts.json"), &profiles); err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	for _, p := range profiles {
-		if strings.TrimSpace(p.Name) == "" || !validMetadata(p.Name, 80) || seen[p.Name] {
-			return nil, errors.New("accounts.json：名称必须唯一且为 1–80 字节，不含控制字符")
-		}
-		seen[p.Name] = true
-		for key, value := range p.Env {
-			if key == "" || strings.ContainsAny(key, "=\x00") || strings.HasPrefix(key, "WTABLE_") || strings.ContainsRune(value, 0) {
-				return nil, errors.New("accounts.json：环境变量无效或试图覆盖 WTABLE_* 保留变量")
-			}
-		}
-	}
-	return profiles, nil
-}
-
-func (s *Server) accountEnv(name string) (map[string]string, error) {
-	if name == "" {
-		return nil, nil
-	}
-	profiles, err := s.accountProfiles()
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range profiles {
-		if p.Name == name {
-			return p.Env, nil
-		}
-	}
-	return nil, errors.New("账号配置不存在；请检查 accounts.json")
 }
 
 func builtinPresets() []model.Preset {
@@ -190,12 +149,19 @@ func (s *Server) catalog() (model.Catalog, error) {
 		}
 	}
 	s.catalogMu.Unlock()
+	roles, err := s.roles()
+	if err != nil {
+		return model.Catalog{}, err
+	}
 	accounts := []string{}
+	accountInfos := []model.AccountInfo{}
 	for _, p := range profiles {
 		accounts = append(accounts, p.Name)
+		accountInfos = append(accountInfos, model.AccountInfo{Name: p.Name, Endpoint: p.Endpoint})
 	}
 	sort.Strings(accounts)
-	return model.Catalog{Presets: presets, Accounts: accounts}, nil
+	sort.Slice(accountInfos, func(i, j int) bool { return accountInfos[i].Name < accountInfos[j].Name })
+	return model.Catalog{Presets: presets, Accounts: accounts, Roles: roles, AccountProfiles: accountInfos}, nil
 }
 
 func (s *Server) resolvePreset(args *model.SpawnParams) error {
@@ -273,6 +239,7 @@ func (s *Server) briefTextLocked(p model.Pane, extra []string) (string, error) {
 	}
 	sort.Strings(peers)
 	text := fmt.Sprintf("# Worktable brief\nName: %s\nPane: %s\nRole: %s\nCwd: %s\nLayer: %s\nPermitted outgoing peers: %s\n", p.Name, p.ID, p.Role, p.Cwd, p.Layer, strings.Join(peers, ", "))
+	text += "\n## Collaboration contract\n"
 	text += "Check current peers before sending: \"$WTABLE_CLI\" peers. Grants can change.\n"
 	if p.Backend == "acp" {
 		text += "Tasks arrive through ACP session/prompt; turn completion reports the result automatically. Do not call CLI ack, next or result for ACP tasks.\n"
@@ -280,6 +247,9 @@ func (s *Server) briefTextLocked(p model.Pane, extra []string) (string, error) {
 		text += "For injected tasks (including this brief), read task_id in the envelope; accept with \"$WTABLE_CLI\" ack <task-id>; finish with \"$WTABLE_CLI\" result <task-id> <result>. ACK is not completion.\nFor claim tasks only: \"$WTABLE_CLI\" next claims work; finish with the same result command. Never use next to claim injected tasks.\n"
 	}
 	text += "Send only to permitted peers. For PTY peers use \"$WTABLE_CLI\" send --queue --delivery inject <peer-id> <text>; for ACP peers use --delivery prompt instead. You cannot recruit/spawn agents or add/remove edges. Never print tokens or credentials.\n"
+	if p.RoleTemplate != "" {
+		text += "\n## Role instructions (startup snapshot)\n" + p.RoleInstructions + "\n"
+	}
 	if len(text) > briefLimit {
 		return "", errors.New("brief 超过 2048 UTF-8 字节；请缩短名称、角色、目录或连线列表")
 	}
@@ -353,6 +323,10 @@ func (s *Server) updatePane(args model.PaneUpdate) (model.Pane, error) {
 	if _, err := s.accountEnv(args.Account); err != nil {
 		return model.Pane{}, err
 	}
+	endpoint, err := s.accountEndpoint(args.Account)
+	if err != nil {
+		return model.Pane{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.paneLocked(args.ID)
@@ -368,7 +342,22 @@ func (s *Server) updatePane(args model.PaneUpdate) (model.Pane, error) {
 	copy := clonePane(*p)
 	copy.Name = args.Name
 	copy.Role = args.Role
+	if args.RoleTemplate != nil && *args.RoleTemplate != p.RoleTemplate {
+		copy.RoleTemplate = *args.RoleTemplate
+		copy.RoleInstructions, copy.RoleHash = "", ""
+		if *args.RoleTemplate != "" {
+			role, err := s.role(*args.RoleTemplate)
+			if err != nil {
+				return model.Pane{}, err
+			}
+			copy.RoleInstructions, copy.RoleHash = role.Instructions, roleHash(role.Instructions)
+			if copy.Role == "" {
+				copy.Role = role.Name
+			}
+		}
+	}
 	copy.Account = args.Account
+	copy.Endpoint = endpoint
 	text, err := s.briefTextLocked(copy, nil)
 	if err != nil {
 		return model.Pane{}, err
@@ -419,14 +408,20 @@ func (s *Server) removePane(ref string) error {
 	s.state.Edges = edges
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
+		changed := false
 		if t.State == "queued" && (t.From == id || t.To == id) {
+			changed = true
 			t.State = "cancelled"
 			t.Result = "pane 已移除，排队任务已取消"
 			t.UpdatedAt = time.Now()
 		} else if t.To == id && activeState(t.State) {
+			changed = true
 			t.State = "unknown"
 			t.Result = "pane 已移除，执行结果未确认"
 			t.UpdatedAt = time.Now()
+		}
+		if changed {
+			s.completeReportLocked(t)
 		}
 		if t.To == id {
 			if cancel := s.taskCancels[t.ID]; cancel != nil {

@@ -10,6 +10,8 @@ type divider struct {
 	rect
 	vertical bool
 	index    int
+	node     *viewNode
+	area     rect
 }
 
 func (r rect) contains(x, y int) bool {
@@ -49,7 +51,7 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 	pressed := down && !wasDown
 	u.mouseDown = down
 	// Mouse input must never change the target of an open prompt or approve it.
-	if u.graph != nil || u.help || u.mode != "" || u.pendingPaste != "" || len(u.snapshot.Permissions) > 0 || u.pasting {
+	if u.graph != nil || u.picker != nil || u.help || u.mode != "" || u.pendingPaste != "" || len(u.snapshot.Permissions) > 0 || u.pasting {
 		u.drag = nil
 		u.selection = nil
 		return
@@ -129,6 +131,20 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 	}
 	if u.drag != nil {
 		d := *u.drag
+		if d.node != nil {
+			coordinate, total, minimum := y-d.area.y, d.area.h, 3
+			if d.vertical {
+				coordinate, total, minimum = x-d.area.x, d.area.w, 8
+			}
+			usable := total - 1
+			if usable < 2 {
+				return
+			}
+			minimum = min(minimum, usable/2)
+			d.node.ratio = float64(max(minimum, min(usable-minimum, coordinate))) / float64(usable)
+			u.resize()
+			return
+		}
 		cuts, coordinate, minimum := u.rowCuts, y, 3
 		if d.vertical {
 			cuts, coordinate, minimum = u.colCuts, x, 8
@@ -172,6 +188,7 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 				u.copyMode = false
 			}
 			u.focus = i
+			u.tab().focus = p.ID
 			if restartable(p.State) && y == r.y+1 {
 				u.restartCurrent()
 				return
