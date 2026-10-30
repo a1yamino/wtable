@@ -10,11 +10,12 @@ import (
 )
 
 type State struct {
-	Version int           `json:"version"`
-	Panes   []model.Pane  `json:"panes"`
-	Tasks   []model.Task  `json:"tasks"`
-	Edges   []model.Edge  `json:"edges"`
-	Layers  []model.Layer `json:"layers"`
+	Reports []model.Report `json:"reports"`
+	Version int            `json:"version"`
+	Panes   []model.Pane   `json:"panes"`
+	Tasks   []model.Task   `json:"tasks"`
+	Edges   []model.Edge   `json:"edges"`
+	Layers  []model.Layer  `json:"layers"`
 }
 
 type Store struct{ db *sql.DB }

@@ -107,7 +107,7 @@ func (u *ui) draw() {
 	if s := u.selection; s != nil {
 		selectionKey = fmt.Sprintf("%p:%d:%d:%t", s, s.anchor, s.end, s.moved)
 	}
-	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll)
+	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll, u.reportView, u.reportCursor, u.reportDetail, u.taskScreen, u.taskDelivery, u.taskQueue)
 	if key == u.lastDrawKey && reflect.DeepEqual(u.snapshot, u.lastDrawSnapshot) {
 		return
 	}
@@ -207,7 +207,7 @@ func (u *ui) draw() {
 	}
 	u.line(0, h-1, w, status, barStyle)
 	if u.help {
-		u.modal([]string{"wtable 快捷键（先按 Ctrl-a，再按下一键）", "?  帮助；任意键关闭帮助", "n  新建 $SHELL 终端", "c  输入 shell 命令（/bin/zsh -lc 执行）", "o  下一个 pane；s 网格 / 左右 / 上下；z 聚焦放大", "b  切换任务列表；t 给当前 pane 发送任务 / ACP prompt", "g  授权边：来源ID 目标ID；r 删除边", "k  任务列表：↑↓ 选择、Enter 详情、c 取消；x 停止 pane", "R  原地重启已退出 pane；退出 pane 内 Enter 也可重启", "[  回看模式：↑↓、PgUp/PgDn；y 复制可见屏到剪贴板", "a / Ctrl-a  发送原 Ctrl-a；普通 Ctrl-Z/P 等直达终端", "d / q  离开界面（后台 pane 保持运行）", "输入框：←→ 编辑，Home/End 行首尾，Ctrl-U/W 删除，↑↓ 历史", "Enter 提交；任务 Alt-Enter 换行；Esc 取消", "鼠标：点击 pane 聚焦；拖动分隔线调整行 / 列大小", "拖选 pane 内文字，松开复制；Esc / 点击恢复实时画面", "滚轮回看；应用启用鼠标时转发滚轮，Shift+滚轮强制回看", "MVP：选区限可见屏；点击不转发到 pane 内应用"})
+		u.modal([]string{"wtable 快捷键（先按 Ctrl-a，再按下一键）", "?  帮助；任意键关闭帮助", "n  新建 $SHELL 终端", "c  输入 shell 命令（/bin/zsh -lc 执行）", "o  下一个 pane；s 网格 / 左右 / 上下；z 聚焦放大", "b  切换任务列表；t 给当前 pane 发送任务 / ACP prompt", "g  授权边：来源ID 目标ID；r 删除边", "k  任务列表：Enter 详情、Tab 报告；详情中重发 / 查看屏幕 / 人工处理", "t  发任务：Tab 切换 inject/claim，Ctrl-Q 切换显式排队", "R  原地重启已退出 pane；退出 pane 内 Enter 也可重启", "[  回看模式：↑↓、PgUp/PgDn；y 复制可见屏到剪贴板", "a / Ctrl-a  发送原 Ctrl-a；普通 Ctrl-Z/P 等直达终端", "d / q  离开界面（后台 pane 保持运行）", "输入框：←→ 编辑，Home/End 行首尾，Ctrl-U/W 删除，↑↓ 历史", "Enter 提交；任务 Alt-Enter 换行；Esc 取消", "鼠标：点击 pane 聚焦；拖动分隔线调整行 / 列大小", "拖选 pane 内文字，松开复制；Esc / 点击恢复实时画面", "滚轮回看；应用启用鼠标时转发滚轮，Shift+滚轮强制回看", "MVP：选区限可见屏；点击不转发到 pane 内应用"})
 	}
 	if u.taskView {
 		u.drawTasks()
@@ -318,10 +318,18 @@ func cellStyle(c model.Cell) tcell.Style {
 func (u *ui) drawInput() {
 	w, h := u.screen.Size()
 	width := max(1, min(90, max(1, w-4))-2)
-	title := map[string]string{"command": "新终端命令（通过 /bin/zsh -lc 执行）", "task": "发送任务", "edge": "添加授权边：来源名称 目标名称", "unedge": "删除授权边：来源名称 目标名称", "stop": "停止当前 pane：输入 y 后 Enter 确认"}[u.mode]
+	title := map[string]string{"command": "新终端命令（通过 /bin/zsh -lc 执行）", "task": "发送任务", "edge": "添加授权边：来源名称 目标名称", "unedge": "删除授权边：来源名称 目标名称", "stop": "停止当前 pane：输入 y 后 Enter 确认", "task-done": "人工标记完成：输入实际结果", "task-fail": "人工标记失败：输入原因", "task-redirect": "重发到其他 pane：输入名称（保留原任务）", "task-confirm-stop": "确认任务已停止：输入 y（不会自动判断）", "task-raw": "原始输入：<Enter> <Esc> <Ctrl-C> <Up> <Down>，不自动回车"}[u.mode]
 	if u.mode == "task" {
 		if p := u.current(); p != nil {
 			title += " → " + p.Name
+			mode := u.taskDelivery
+			if mode == "" {
+				mode = "inject"
+				if p.Backend == "acp" {
+					mode = "prompt"
+				}
+			}
+			title += fmt.Sprintf(" [%s] 排队:%t · Tab 切换 · Ctrl-Q 排队", mode, u.taskQueue)
 		}
 	}
 	lines := []string{title, "←→ 编辑 · ↑↓ 历史 · Enter 提交 · Alt-Enter 换行 · Esc 取消"}

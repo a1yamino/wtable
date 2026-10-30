@@ -65,7 +65,7 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 | `z` | 放大当前 pane／恢复布局 |
 | `b` | 显示或隐藏任务栏 |
 | `[` | 回看模式，使用方向键或 `j/k` 滚动；`y` 复制可见文本，`q` 退出 |
-| `t` | 向当前 pane 提交任务；ACP 自动执行，PTY 需要主动领取 |
+| `t` | 向当前 pane 提交任务；Tab 切换 PTY 的 inject/claim，Ctrl-Q 切换显式排队 |
 | `g` / `r` | 新增／删除单向授权边，输入来源与目标 pane |
 | `k` | 打开任务列表：↑↓ 选择、Enter 查看详情、`c` 请求取消、Esc 返回 |
 | `x` | 停止当前 pane，输入 `y` 确认 |
@@ -81,7 +81,18 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 
 输入框支持左右移动、Home/End（或 Ctrl-A/E）定位行首尾、Delete/Backspace 删除、Ctrl-U 删除到行首、Ctrl-W 删除前一个词；粘贴插入光标处。↑↓ 浏览当前输入类型的历史，历史仅在本次 TUI 中保存。任务支持 Alt-Enter 换行。提交失败时保留输入供修正。
 
-`Ctrl-a t` 向当前 pane 发送任务，成功后显示目标名称和排队反馈，并展开任务栏；PTY 任务仍须由 Agent 主动领取。`Ctrl-a k` 打开任务列表，也可点击列表中的任务进入详情。详情展示完整 prompt 和 result，支持方向键、翻页键或滚轮滚动。`c` 取消排队任务或请求取消运行中的 ACP 任务；运行中的 PTY 任务不能可靠取消，会显示原因。
+`Ctrl-a t` 向当前 pane 发送任务，成功后显示目标名称和真实状态，并展开任务栏。`Ctrl-a k` 打开任务列表，Enter 或点击任务可查看完整内容与结果。详情支持滚轮和翻页，并提供以下操作：
+
+| 详情按键 | 操作 |
+|---|---|
+| `r` / `a` | 重发 / 改派，创建带 `RetryOf` 的新任务 |
+| `v` / `i` | 查看一次性屏幕快照 / 发送原始输入 |
+| `m` | 人工确认已送达；仍等待 `ack` 或 `result` |
+| `d` / `f` | 输入结果，人工标记完成 / 失败 |
+| `c` / `x` | 请求取消 |
+| `C` | 确认注入任务已经停止，输入 `y` 才生效 |
+
+任务列表按 Tab 切到报告收件箱。报告显示未读和 `undeliverable` 状态；Enter 查看摘要，再按 Enter 查看原任务（仍需原任务读取权限）。原始输入支持 `<Enter>`、`<Esc>`、`<Ctrl-C>` 和方向键标记，不自动追加回车。
 
 已退出的 pane 显示重启入口：聚焦后按 Enter、点击入口行，或按 `Ctrl-a R` 原地重启。重启保留 pane ID、名称与授权边，并重新执行原启动命令；PTY 的聊天历史恢复取决于原命令是否包含对应 Agent 的 resume 参数。
 
@@ -101,19 +112,69 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 
 连线是单向的；双向协作需要分别授权。`disconnect` 会取消这条边上尚未派发的任务，已执行的操作不会撤销。
 
-PTY 中的 agent 需要明确使用工作台命令接收和回报任务。启动时会注入 `WTABLE_CLI`、`WTABLE_PANE_ID`、`WTABLE_PEER_TOKEN` 和 `WTABLE_HOME`。给 CLI agent 的协作指令可以包含：
+### 投递与确认
+
+人类发送给 PTY 的任务默认采用 `inject`；ACP 目标采用 `prompt`。pane 内 agent 向 PTY peer 派活默认保留 `claim`，可显式指定 `--delivery inject`。已有无投递字段的 PTY 任务按 `claim` 解释。
 
 ```sh
-# 在工作台创建的 pane 内执行，不要手工复制或打印凭证。
-"$WTABLE_CLI" peers
-"$WTABLE_CLI" next --timeout 30s
-"$WTABLE_CLI" result TASK_ID '已完成检查，结果如下……'
-"$WTABLE_CLI" send reviewer '请检查这次修改'
+./bin/wtable send --delivery inject coder '检查当前修改'
+./bin/wtable send --delivery claim coder '等待主动领取的任务'
+./bin/wtable send --queue coder '闸门允许后再发送'
 ```
 
-`next` 返回任务 JSON；没有任务时返回 `null`。一次只领取一个任务。结果可以通过标准输入提交：`printf '%s' "$result" | "$WTABLE_CLI" result TASK_ID -`。
+注入前会检查进程、阻塞文案、输出稳定时间和未确认的前一条注入任务。默认稳定窗口为 400ms，写后验证为 3s，ACK 超时为 90s。直接启动 `codex`、`claude`、`agy` 时使用内置阻塞文案；其他程序或包装脚本可自行配置：
 
-同一发送者、同一 `--key` 和同一任务内容返回原 task；相同 key 对应不同内容时拒绝。已派发但无法确认结果的任务标为 `unknown`，不会自动重投。`cancelling` 表示已请求取消但仍等待 agent 确认。
+```sh
+./bin/wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
+  --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
+```
+
+闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；`--queue` 才会保留任务并等待闸门。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
+
+`delivered` 只证明写入或协议投递。PTY agent 调用 `ack` 才进入 `accepted`；直接提交结果也可证明已接手。写后只看到回显时记录 `write-unconfirmed`，这不是失败，也不是完成。ACK 超时变为 `unknown`，不自动重投。ACP 首个当前 turn 的更新进入 `accepted`，turn 结束自动完成，不需要 CLI `result`。
+
+启动时注入 `WTABLE_CLI`、`WTABLE_PANE_ID`、`WTABLE_PEER_TOKEN` 和 `WTABLE_HOME`。在 agent pane 内执行：
+
+```sh
+# 不要复制或打印凭据。
+"$WTABLE_CLI" ack TASK_ID
+"$WTABLE_CLI" result TASK_ID '实际结果'
+# claim 模式使用 next；一次只能领取一条，保留 running 状态值。
+"$WTABLE_CLI" next --timeout 30s
+"$WTABLE_CLI" send --delivery inject reviewer '请检查这次修改'
+```
+
+结果也可从标准输入提交。`delivered`、`accepted`、`unknown`、`cancelled`、`failed` 和旧 `running` 状态接受迟到结果；`completed` 后拒绝覆盖。相同发送者、去重键及内容返回原 task；同一键对应不同内容时拒绝。
+
+### 报告与后续任务
+
+```sh
+./bin/wtable send --on-complete notify --report-to reviewer coder '分析并通知 reviewer'
+./bin/wtable send --on-complete handoff --report-to reviewer coder '完成后交给 reviewer 继续'
+./bin/wtable reports
+./bin/wtable report REPORT_ID
+./bin/wtable report seen REPORT_ID
+```
+
+`notify` 只写报告收件箱，绝不写入目标终端，也不创建新任务。`handoff` 创建带 `ParentTask` 的新任务，保留原发送身份并经过正常投递。没有汇报目标时默认 `none`；指定 `ReportTo` 而未指定模式时默认 `notify`。
+
+汇报目标需要原发送方到目标的授权边，创建和完成时都会检查。撤销授权后报告为 `undeliverable`，摘要仍保存供处理。报告和完成状态一起持久化，同一原任务只生成一份报告。摘要最多 4KiB；完整结果仍只允许原任务收发双方及 controller 读取。
+
+### 人工处理
+
+```sh
+./bin/wtable task confirm TASK_ID
+./bin/wtable task done TASK_ID '人工确认的实际结果'
+./bin/wtable task fail TASK_ID '失败原因'
+./bin/wtable task retry --to reviewer TASK_ID
+./bin/wtable cancel TASK_ID
+# 确认 PTY 工作已停止后再执行，不把 Ctrl-C 当成停止证明。
+./bin/wtable cancel --confirmed TASK_ID
+```
+
+重发只接受失败、未知、取消或写入未确认的任务，保留原记录，并用 `RetryOf` 关联新任务。已在执行或排队的任务不能重发。重发写入未确认的任务时，原记录转为 `unknown` 并继续接受迟到结果；显式重发仍可能造成重复工作。
+
+排队任务直接取消；ACP 等待协议确认。注入任务先发送中断，进入 `cancelling`，再由人确认 `cancelled`。终端历史和已发生的文件操作不会被撤销。旧 claim 模式的执行中 PTY 任务仍不能可靠取消，需要检查或停止 pane。
 
 连线限制工作台 API，不限制同一系统用户直接访问文件。worktree 用于隔离工作目录，不是操作系统沙箱。
 
@@ -129,7 +190,9 @@ PTY 中的 agent 需要明确使用工作台命令接收和回报任务。启动
 
 在目标仓库目录中执行 `wtable changes` 或 `wtable diff [PATH]` 可查看变更。MVP 不自动提交、合并、删除或归档 worktree。
 
-## 恢复与诊断
+## 升级、恢复与诊断
+
+P0 版本为 `0.2.0`。CLI 会检查 daemon 版本，不会把新投递参数交给旧 daemon 静默忽略。保留旧会话时，请为新版使用独立的 `WTABLE_HOME`；需要沿用原目录时，先结束旧会话并执行 `shutdown`，再启动新版。仅重新 attach 不会升级后台 daemon，`shutdown` 会停止该目录下的全部 pane。
 
 ```sh
 ./bin/wtable diag
@@ -146,10 +209,11 @@ PTY 中的 agent 需要明确使用工作台命令接收和回报任务。启动
 ## 验证
 
 ```sh
-go test -race ./internal/terminal ./internal/agent
+go test -race ./internal/terminal ./internal/agent ./internal/server
 go vet ./...
 go build -o bin/wtable ./cmd/wtable
 python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.json
+python3 scripts/p0_smoke.py --binary bin/wtable --output .dev/test-results/p0.json
 ```
 
 smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授权、任务去重、审批文件效果、worktree 隔离与崩溃恢复。ACP 部分使用本地确定性 fixture，不调用外部模型。测试会清理自建的进程和临时目录，并保留 JSON 验收报告。
@@ -166,4 +230,4 @@ smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授�
 - 最多保留 32 个 pane、2,000 条任务；结构化聊天视图有大小上限，完整任务结果单独保存。没有内置清理命令。
 - notes、角色管理、内置编辑器、账号池、计划任务、图片和浏览器门户属于后续范围。
 
-原始计划与本轮范围说明在 `.dev/plan.md`；`.dev/` 和 `bin/` 均由 Git 忽略。
+当前实现完成 P0 送达与回传；P1 创建面板、身份说明接入和 P2 Graph 尚未实现。`docs/`、`.dev/` 和 `bin/` 均由 Git 白名单规则忽略。

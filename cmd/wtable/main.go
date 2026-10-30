@@ -37,7 +37,7 @@ func run(args []string) error {
 		return nil
 	}
 	if len(args) > 0 && args[0] == "version" {
-		fmt.Println("wtable 0.1.0")
+		fmt.Println("wtable " + config.Version)
 		return nil
 	}
 	paths, err := config.Resolve()
@@ -68,6 +68,24 @@ func run(args []string) error {
 		return err
 	}
 	defer c.Close()
+	checkVersion := true
+	if len(args) > 0 {
+		switch args[0] {
+		case "diag", "list", "panes", "screen", "stop", "shutdown":
+			checkVersion = false
+		}
+	}
+	if checkVersion {
+		var info struct {
+			Version string `json:"version"`
+		}
+		if err = c.Call(ctx, "diag.info", nil, &info); err != nil {
+			return fmt.Errorf("daemon 未提供兼容的版本确认（CLI %s）；请使用新的 WTABLE_HOME，或先结束旧会话再运行 wtable shutdown：%w", config.Version, err)
+		}
+		if info.Version != config.Version {
+			return fmt.Errorf("CLI 版本 %s 与 daemon 版本 %q 不一致；请使用新的 WTABLE_HOME，或先结束旧会话再运行 wtable shutdown，然后重新启动", config.Version, info.Version)
+		}
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -81,7 +99,7 @@ func run(args []string) error {
 	call := func(method string, args, result any) error { return c.Call(ctx, method, args, result) }
 	jsonMode := false
 	// Free-form prompts and child command arguments must remain byte-for-byte.
-	if args[0] != "new" && args[0] != "recruit" && args[0] != "send" && args[0] != "ask" && args[0] != "next" && args[0] != "result" && args[0] != "wait" && args[0] != "input" {
+	if args[0] != "new" && args[0] != "recruit" && args[0] != "send" && args[0] != "ask" && args[0] != "next" && args[0] != "result" && args[0] != "wait" && args[0] != "input" && args[0] != "task" && args[0] != "cancel" {
 		clean := make([]string, 0, len(args))
 		for _, arg := range args {
 			if arg == "--json" {
@@ -129,6 +147,11 @@ func run(args []string) error {
 		dir := fs.String("dir", cwd, "工作目录")
 		backend := fs.String("backend", "pty", "pty 或 acp")
 		layer := fs.String("layer", "", "已有 layer 名称")
+		blockedRegex := fs.String("blocked-regex", "", "阻塞界面的正则表达式")
+		tailLines := fs.Int("tail-lines", 0, "检测屏幕末尾行数（0 使用默认 12）")
+		settle := fs.Duration("settle", 0, "投递前输出稳定时间（0 使用默认 400ms）")
+		verify := fs.Duration("verify", 0, "写入后验证时间（0 使用默认 3s）")
+		ackTimeout := fs.Duration("ack-timeout", 0, "等待接手证据的时限（0 使用默认 90s）")
 		rest := args[1:]
 		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 			*name = rest[0]
@@ -167,7 +190,10 @@ func run(args []string) error {
 		var p model.Pane
 		spawnCtx, stop := context.WithTimeout(ctx, 45*time.Second)
 		defer stop()
-		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24}, &p)
+		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24, DeliveryConfig: model.DeliveryConfig{
+			BlockedRegex: *blockedRegex, TailLines: *tailLines, SettleMS: int(settle.Milliseconds()),
+			VerifyMS: int(verify.Milliseconds()), AckTimeoutMS: int(ackTimeout.Milliseconds()),
+		}}, &p)
 		if err != nil {
 			return err
 		}
@@ -202,6 +228,11 @@ func run(args []string) error {
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
 		key := fs.String("key", "", "任务去重键")
+		delivery := fs.String("delivery", "", "inject、claim 或 prompt（省略时由服务端选择）")
+		queue := fs.Bool("queue", false, "目标忙时显式排队")
+		onComplete := fs.String("on-complete", "", "none、notify 或 handoff")
+		reportTo := fs.String("report-to", "", "结果回传目标 pane")
+		parentTask := fs.String("parent", "", "关联的父任务 ID")
 		timeout := fs.Duration("timeout", 10*time.Minute, "等待时限")
 		if err = fs.Parse(args[1:]); err != nil {
 			return err
@@ -211,7 +242,10 @@ func run(args []string) error {
 			return fmt.Errorf("用法：wtable %s [--key KEY] <pane> <prompt>", args[0])
 		}
 		var t model.Task
-		if err = call("task.send", map[string]string{"to": rest[0], "prompt": strings.Join(rest[1:], " "), "dedupe_key": *key}, &t); err != nil {
+		if err = call("task.send", model.SendParams{
+			To: rest[0], Prompt: strings.Join(rest[1:], " "), DedupeKey: *key,
+			DeliveryMode: *delivery, Queue: *queue, OnComplete: *onComplete, ReportTo: *reportTo, ParentTask: *parentTask,
+		}, &t); err != nil {
 			return err
 		}
 		if args[0] == "ask" {
@@ -303,15 +337,48 @@ func run(args []string) error {
 			return fmt.Errorf("任务状态：%s", t.State)
 		}
 		return nil
-	case "task":
+	case "ack":
 		if len(args) != 2 {
-			return errors.New("用法：wtable task <task-id>")
+			return errors.New("用法：wtable ack <task-id>")
 		}
-		var t model.Task
-		if err = call("task.get", map[string]string{"id": args[1]}, &t); err != nil {
+		var out any
+		if err = call("task.ack", map[string]string{"id": args[1]}, &out); err != nil {
 			return err
 		}
-		return printJSON(t)
+		return printJSON(out)
+	case "task":
+		return taskCommand(args[1:], call)
+	case "reports":
+		if len(args) != 1 {
+			return errors.New("用法：wtable reports [--json]")
+		}
+		var reports []model.Report
+		if err = call("report.list", nil, &reports); err != nil {
+			return err
+		}
+		if jsonMode {
+			return printJSON(reports)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\t父任务\t来源\t目标\t状态\t模式\t已读\t摘要")
+		for _, r := range reports {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%t\t%s\n", r.ID, r.ParentTask, r.From, r.To, r.State, r.Mode, r.Seen, strings.ReplaceAll(short(r.Summary, 70), "\n", " "))
+		}
+		return w.Flush()
+	case "report":
+		method, id := "report.get", ""
+		if len(args) == 2 {
+			id = args[1]
+		} else if len(args) == 3 && args[1] == "seen" {
+			method, id = "report.seen", args[2]
+		} else {
+			return errors.New("用法：wtable report <report-id> | report seen <report-id>")
+		}
+		var out any
+		if err = call(method, map[string]string{"id": id}, &out); err != nil {
+			return err
+		}
+		return printJSON(out)
 	case "tasks":
 		var tasks []model.Task
 		if err = call("task.list", nil, &tasks); err != nil {
@@ -321,17 +388,23 @@ func run(args []string) error {
 			return printJSON(tasks)
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\t来源\t目标\t状态\t内容")
+		fmt.Fprintln(w, "ID\t来源\t目标\t状态\t送达\t送达错误\t内容")
 		for _, t := range tasks {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.ID, t.From, t.To, t.State, strings.ReplaceAll(short(t.Prompt, 70), "\n", " "))
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", t.ID, t.From, t.To, t.State, t.DeliveryStatus, strings.ReplaceAll(t.DeliveryError, "\n", " "), strings.ReplaceAll(short(t.Prompt, 70), "\n", " "))
 		}
 		return w.Flush()
 	case "cancel":
-		if len(args) != 2 {
-			return errors.New("用法：wtable cancel <task-id>")
+		fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
+		confirmed := fs.Bool("confirmed", false, "人工确认：已请求中断且 PTY 内工作确已停止")
+		if err = fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(fs.Args()) != 1 {
+			return errors.New("用法：wtable cancel [--confirmed] <task-id>；--confirmed 仅在人工确认 PTY 工作已停止后使用")
 		}
 		var out any
-		if err = call("task.cancel", map[string]string{"id": args[1]}, &out); err != nil {
+		if err = call("task.cancel", map[string]any{"id": fs.Args()[0], "confirmed": *confirmed}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -423,6 +496,103 @@ func run(args []string) error {
 	}
 }
 
+// taskCommand parses options only before task IDs, preserving free-form result text.
+func taskCommand(args []string, call func(string, any, any) error) error {
+	usage := errors.New("用法：wtable task TASK | task done|fail [--json] TASK TEXT|- | task retry [--to PANE] [--queue] TASK | task confirm|seen|result TASK")
+	fs := flag.NewFlagSet("task", flag.ContinueOnError)
+	jsonMode := fs.Bool("json", false, "输出 JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	args = fs.Args()
+	if len(args) == 0 {
+		return usage
+	}
+	subcommand := args[0]
+	switch subcommand {
+	case "done", "fail":
+		fs := flag.NewFlagSet("task "+subcommand, flag.ContinueOnError)
+		fs.BoolVar(jsonMode, "json", *jsonMode, "输出 JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		rest := fs.Args()
+		if len(rest) < 2 {
+			return usage
+		}
+		text := strings.Join(rest[1:], " ")
+		if text == "-" {
+			b, err := io.ReadAll(io.LimitReader(os.Stdin, (1<<20)+1))
+			if err != nil {
+				return err
+			}
+			text = string(b)
+		}
+		var out any
+		if err := call("task.done", map[string]any{"id": rest[0], "result": text, "failed": subcommand == "fail"}, &out); err != nil {
+			return err
+		}
+		return printJSON(out)
+	case "retry":
+		fs := flag.NewFlagSet("task retry", flag.ContinueOnError)
+		fs.BoolVar(jsonMode, "json", *jsonMode, "输出 JSON")
+		to := fs.String("to", "", "改派给目标 pane")
+		queue := fs.Bool("queue", false, "目标忙时显式排队")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(fs.Args()) != 1 {
+			return usage
+		}
+		var t model.Task
+		if err := call("task.retry", map[string]any{"id": fs.Args()[0], "to": *to, "queue": *queue}, &t); err != nil {
+			return err
+		}
+		if *jsonMode {
+			return printJSON(t)
+		}
+		fmt.Println(t.ID)
+		return nil
+	}
+	// Read-only/detail commands have no free-form text; retain trailing --json support.
+	clean := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--json" {
+			*jsonMode = true
+		} else {
+			clean = append(clean, arg)
+		}
+	}
+	args = clean
+	method, id, resultOnly := "task.get", "", false
+	switch subcommand {
+	case "confirm", "seen", "result":
+		if len(args) != 2 {
+			return usage
+		}
+		id = args[1]
+		if subcommand == "result" {
+			resultOnly = true
+		} else {
+			method = "task." + subcommand
+		}
+	default:
+		if len(args) != 1 {
+			return usage
+		}
+		id = args[0]
+	}
+	var t model.Task
+	if err := call(method, map[string]string{"id": id}, &t); err != nil {
+		return err
+	}
+	if resultOnly && !*jsonMode {
+		fmt.Print(t.Result)
+		return nil
+	}
+	return printJSON(t)
+}
+
 func ensureDaemon(ctx context.Context, p config.Paths) error {
 	probe, err := net.DialTimeout("unix", p.Socket, 200*time.Millisecond)
 	if err == nil {
@@ -471,7 +641,7 @@ func waitTask(ctx context.Context, c *rpc.Client, id string, timeout time.Durati
 		if err := c.Call(ctx, "task.get", map[string]string{"id": id}, &t); err != nil {
 			return t, err
 		}
-		if t.State != "queued" && t.State != "running" && t.State != "cancelling" {
+		if t.State != "queued" && t.State != "running" && t.State != "delivered" && t.State != "accepted" && t.State != "cancelling" {
 			return t, nil
 		}
 		if err := pause(ctx, 150*time.Millisecond); err != nil {
@@ -520,12 +690,22 @@ const help = `wtable — macOS 终端 Agent 工作台（MVP）
   wtable connect FROM TO                   授予单向任务投递权限
   wtable disconnect FROM TO                移除权限并取消尚未投递的任务
   wtable peers                            查看当前身份可访问的接收者
-  wtable send [--key KEY] PANE PROMPT       投递任务，打印 task ID
-  wtable ask [--timeout 10m] PANE PROMPT    投递并等待（ACP 自动执行）
+  wtable send [OPTIONS] PANE PROMPT        投递任务，打印 task ID
+  wtable ask [OPTIONS] PANE PROMPT         投递并等待（--timeout 默认 10m）
+    --key KEY --delivery inject|claim|prompt --queue
+    --on-complete none|notify|handoff --report-to PANE --parent TASK
   wtable next [--timeout 30s]               pane 内领取任务，输出 JSON
-  wtable result [--failed] TASK TEXT       接收 pane 提交结果；TEXT 为 - 则读 stdin
+  wtable ack TASK                         接收 pane 确认已接手
+  wtable result [--failed] TASK TEXT|-     接收 pane 提交结果；- 读取 stdin
   wtable wait [--timeout 10m] TASK          等待已有任务
-  wtable tasks | task TASK | cancel TASK   列表、详情、取消
+  wtable tasks | task TASK                 任务列表（含送达状态）、详情
+  wtable task done|fail TASK TEXT|-        人工标记完成或失败
+  wtable task retry [--to PANE] [--queue] TASK  新建重试任务，保留原记录
+  wtable task confirm TASK | task seen TASK   人工确认送达、标记已读
+  wtable task result TASK                  读取完整结果
+  wtable cancel [--confirmed] TASK         请求取消；PTY 中断后需人工确认已停止
+    --confirmed 仅表示人工已确认 PTY 工作停止，不自动确认
+  wtable reports | report ID | report seen ID  报告收件箱、详情、已读
   wtable permissions                      查看待审批操作及选项 ID
   wtable approve REQUEST OPTION           明确选择权限选项
 
@@ -537,6 +717,9 @@ Git 与运维：
 
 选项放在位置参数前（layer create 的选项放在名称后）；CMD 放在 -- 后。
 设置 WTABLE_HOME 可使用独立状态目录。默认使用 macOS Application Support/wtable。
-PTY 中的 agent 需主动调用 next/result；普通终端输出不会伪装成结构化回答。
+new/recruit 可配置 --blocked-regex REGEX --tail-lines N --settle 400ms --verify 3s --ack-timeout 90s。
+省略送达方式时：ACP 使用 prompt，人工向 PTY 使用 inject，peer 向 PTY 使用 claim。
+PTY inject 收到任务后调用 ack/result；claim 使用 next/result；ACP turn 结束自动完成。
+notify 只生成报告；handoff 才派新任务。unknown 表示缺少接手证据，不自动重试。
 Ctrl-a ? 查看 TUI 快捷键。首版不支持远程、历史 reflow、鼠标选区或账号池。
 `

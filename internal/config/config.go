@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const Version = "0.2.0"
+
 type Paths struct{ Home, Socket, Token, Database, Log string }
 
 func Resolve() (Paths, error) {

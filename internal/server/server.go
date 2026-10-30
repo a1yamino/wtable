@@ -33,6 +33,7 @@ type approval struct {
 
 type Server struct {
 	mu          sync.Mutex
+	inputLanes  sync.Map
 	paths       config.Paths
 	db          *store.Store
 	state       store.State
@@ -94,7 +95,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 		}
 	}
 	for i := range state.Tasks {
-		if state.Tasks[i].State == "running" || state.Tasks[i].State == "cancelling" {
+		if activeState(state.Tasks[i].State) {
 			state.Tasks[i].State = "unknown"
 			state.Tasks[i].Result = "执行结果未确认；不会自动重投"
 			state.Tasks[i].UpdatedAt = time.Now()
@@ -113,6 +114,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 	if err != nil {
 		return err
 	}
+	go s.deliveryLoop()
 	defer listener.Close()
 	defer os.Remove(paths.Socket)
 	if err = os.Chmod(paths.Socket, 0600); err != nil {
@@ -156,7 +158,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 	}
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
-		if t.State == "running" || t.State == "cancelling" {
+		if activeState(t.State) {
 			t.State = "unknown"
 			t.Result = "daemon 已停止，执行结果未确认"
 			t.UpdatedAt = time.Now()
@@ -344,7 +346,7 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 		return model.Snapshot{}, err
 	}
 	s.mu.Lock()
-	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Layers: append([]model.Layer{}, s.state.Layers...)}
+	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Reports: append([]model.Report{}, s.state.Reports...), Layers: append([]model.Layer{}, s.state.Layers...)}
 	terms := map[string]*terminal.Terminal{}
 	for _, p := range s.state.Panes {
 		result.Panes = append(result.Panes, clonePane(p))
@@ -394,14 +396,17 @@ func contains(values []string, s string) bool {
 
 func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any, error) {
 	controller := c.principal == "controller"
-	if !controller && !contains([]string{"peer.list", "task.send", "task.next", "task.result", "task.get", "task.list"}, method) {
+	if !controller && !contains([]string{"diag.info", "peer.list", "task.send", "task.next", "task.result", "task.ack", "task.get", "task.list", "task.seen", "report.list", "report.get", "report.seen"}, method) {
 		return nil, errors.New("此操作需要人类控制端权限")
 	}
 	switch method {
 	case "diag.info":
+		if !controller {
+			return map[string]string{"version": config.Version}, nil
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return map[string]any{"pid": os.Getpid(), "home": s.paths.Home, "panes": len(s.state.Panes), "tasks": len(s.state.Tasks), "version": "0.1.0", "store_error": fmt.Sprint(s.storeErr)}, nil
+		return map[string]any{"pid": os.Getpid(), "home": s.paths.Home, "panes": len(s.state.Panes), "tasks": len(s.state.Tasks), "version": config.Version, "store_error": fmt.Sprint(s.storeErr)}, nil
 	case "ui.attach":
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -440,7 +445,7 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any
 		}
 		copy := clonePane(*p)
 		s.mu.Unlock()
-		return s.spawn(model.SpawnParams{Name: copy.Name, Backend: copy.Backend, Command: copy.Command, Cwd: copy.Cwd}, copy.ID)
+		return s.spawn(model.SpawnParams{Name: copy.Name, Backend: copy.Backend, Command: copy.Command, Cwd: copy.Cwd, DeliveryConfig: copy.DeliveryConfig}, copy.ID)
 	case "pane.stop":
 		var a struct {
 			ID string `json:"id"`
@@ -470,6 +475,9 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any
 		if t == nil {
 			return nil, errors.New("pane 没有运行中的 PTY")
 		}
+		lane := s.inputLane(a.ID)
+		lane.Lock()
+		defer lane.Unlock()
 		return true, t.Input([]byte(a.Data))
 	case "pane.resize":
 		var a struct {
@@ -523,6 +531,14 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any
 		return s.nextTask(c.principal, raw)
 	case "task.result":
 		return s.taskResult(c.principal, raw)
+	case "task.ack", "task.confirm", "task.seen":
+		return s.taskMark(c.principal, method, raw)
+	case "task.done":
+		return s.finishTask(c.principal, raw, true)
+	case "task.retry":
+		return s.retryTask(raw)
+	case "report.list", "report.get", "report.seen":
+		return s.reports(c.principal, method, raw)
 	case "task.get", "task.list":
 		return s.getTasks(c.principal, method, raw)
 	case "task.cancel":

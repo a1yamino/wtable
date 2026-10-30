@@ -57,6 +57,24 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 	if u.taskView {
 		u.drag = nil
 		u.selection = nil
+		if u.reportView {
+			delta := 0
+			if e.Buttons()&tcell.WheelUp != 0 {
+				delta = -1
+			}
+			if e.Buttons()&tcell.WheelDown != 0 {
+				delta = 1
+			}
+			if u.reportDetail != nil {
+				u.taskScroll = max(0, u.taskScroll+delta*3)
+			} else {
+				u.reportCursor = max(0, u.reportCursor+delta)
+			}
+			return
+		}
+		if u.taskScreen != nil {
+			return
+		}
 		if e.Buttons()&tcell.WheelUp != 0 {
 			if u.taskDetail != nil {
 				u.taskScroll = max(0, u.taskScroll-3)

@@ -36,6 +36,13 @@ type ui struct {
 	taskDetail                          *model.Task
 	taskScroll                          int
 	taskRows                            map[int]string
+	reportView                          bool
+	reportCursor                        int
+	reportDetail                        *model.Report
+	taskActionID                        string
+	taskDelivery                        string
+	taskQueue                           bool
+	taskScreen                          *model.Frame
 	pasting                             bool
 	paste                               strings.Builder
 	pendingPaste                        string
@@ -209,7 +216,7 @@ func (u *ui) send(data string) {
 }
 func (u *ui) handlePaste(data string) {
 	u.selection = nil
-	if u.taskView || u.help || u.pendingPaste != "" {
+	if (u.taskView && u.mode == "") || u.help || u.pendingPaste != "" {
 		return
 	}
 	if len(u.snapshot.Permissions) > 0 {
@@ -274,12 +281,12 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		u.help = false
 		return false
 	}
-	if u.taskView {
-		u.taskKey(e)
-		return false
-	}
 	if u.mode != "" {
 		u.edit(e)
+		return false
+	}
+	if u.taskView {
+		u.taskKey(e)
 		return false
 	}
 	if u.copyMode {
@@ -381,9 +388,27 @@ func (u *ui) key(e *tcell.EventKey) bool {
 func (u *ui) openInput(mode, initial string) {
 	u.mode = mode
 	u.editor.Begin(mode, initial)
+	if mode == "task" {
+		u.taskDelivery = ""
+		u.taskQueue = false
+	}
 	u.selection = nil
 }
 func (u *ui) edit(e *tcell.EventKey) {
+	if u.mode == "task" && e.Key() == tcell.KeyTab {
+		if p := u.current(); p != nil && p.Backend == "pty" {
+			if u.taskDelivery == "claim" {
+				u.taskDelivery = "inject"
+			} else {
+				u.taskDelivery = "claim"
+			}
+		}
+		return
+	}
+	if u.mode == "task" && e.Key() == tcell.KeyCtrlQ {
+		u.taskQueue = !u.taskQueue
+		return
+	}
 	if e.Key() == tcell.KeyEscape {
 		u.mode = ""
 		u.editor.Set("")
@@ -414,16 +439,20 @@ func (u *ui) edit(e *tcell.EventKey) {
 				return
 			}
 			var task model.Task
-			if !u.call("task.send", map[string]string{"to": p.ID, "prompt": input}, &task) {
+			if !u.call("task.send", model.SendParams{To: p.ID, Prompt: input, DeliveryMode: u.taskDelivery, Queue: u.taskQueue}, &task) {
 				return
 			}
-			u.status = "任务已排队 " + shortTask(task.ID) + " → " + p.Name
-			if p.Backend == "pty" {
-				u.status += " · PTY Agent 需主动领取"
+			u.status = "任务 " + shortTask(task.ID) + " → " + p.Name + "：" + task.State
+			if task.DeliveryMode == "claim" {
+				u.status += " · 等待 Agent 领取"
 			}
 			u.tasks = true
 			_, _ = u.refresh()
 			u.resize()
+		case "task-done", "task-fail", "task-redirect", "task-confirm-stop", "task-raw":
+			if !u.submitTaskAction(mode, input) {
+				return
+			}
 		case "edge", "unedge":
 			fields := strings.Fields(input)
 			if len(fields) != 2 {

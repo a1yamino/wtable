@@ -65,7 +65,7 @@ Press `Ctrl-a` first, then the indicated key:
 | `z` | Zoom the current pane or restore the layout |
 | `b` | Show or hide the task bar |
 | `[` | Enter scrollback mode; use arrow keys or `j/k` to scroll, `y` to copy visible text, and `q` to leave |
-| `t` | Submit a task to the current pane; ACP dispatches automatically, while PTY agents must claim it |
+| `t` | Submit a task; Tab switches PTY inject/claim, Ctrl-Q toggles explicit queuing |
 | `g` / `r` | Add or remove a directed authorization link by entering the source and destination panes |
 | `k` | Open tasks: ↑↓ select, Enter view details, `c` request cancellation, Esc return |
 | `x` | Stop the current pane; enter `y` to confirm |
@@ -81,7 +81,18 @@ The wheel scrolls history in the pane under the pointer and returns to live outp
 
 Input dialogs support Left/Right, Home/End (or Ctrl-A/E), Delete/Backspace, Ctrl-U to delete to the start of the line, and Ctrl-W to delete the previous word. Paste inserts at the cursor. Up/Down browse history for the current input type, stored only for this TUI session. Task input supports Alt-Enter for newlines. Failed submissions keep the draft for editing.
 
-`Ctrl-a t` sends a task to the focused pane, displays queue feedback with the target name, and opens the task bar. PTY agents still need to claim tasks explicitly. `Ctrl-a k` opens the task list; click a row or press Enter to see the complete prompt and result. Arrow keys, page keys, and the wheel scroll details. Press `c` to cancel queued tasks or request cancellation of running ACP tasks. Running PTY tasks cannot be cancelled reliably; the UI reports this restriction.
+`Ctrl-a t` sends a task and shows its target and actual state. `Ctrl-a k` opens tasks; Enter or a click opens the full prompt/result. Details support scrolling and these actions:
+
+| Detail key | Action |
+|---|---|
+| `r` / `a` | Retry / reassign, creating a new task with `RetryOf` |
+| `v` / `i` | Inspect a one-shot screen snapshot / send raw input |
+| `m` | Manually confirm delivery; still await ack/result |
+| `d` / `f` | Enter an actual result to mark done / failed |
+| `c` / `x` | Request cancellation |
+| `C` | Confirm injected work has stopped; requires entering `y` |
+
+Tab switches the task list to the report inbox, which shows unread and undeliverable reports. Enter opens the summary, then Enter opens the parent task subject to its existing access rules. Raw input supports `<Enter>`, `<Esc>`, `<Ctrl-C>`, and arrow-key markers without appending Return automatically.
 
 Exited panes show a restart control: focus one and press Enter, click the control, or use `Ctrl-a R`. Restart retains the pane ID, name, and authorization edges and reruns its original command. Restoring PTY chat history depends on whether that command includes the provider's resume arguments.
 
@@ -101,19 +112,68 @@ The human controller can send tasks to any running pane. An agent inside a pane 
 
 Links are directional. Authorize each direction separately for two-way collaboration. `disconnect` cancels tasks on that link that have not yet been dispatched; it does not undo actions already taken.
 
-Agents running in PTYs must explicitly use workbench commands to receive tasks and report results. Each pane receives `WTABLE_CLI`, `WTABLE_PANE_ID`, `WTABLE_PEER_TOKEN`, and `WTABLE_HOME` in its environment. Instructions for a CLI agent can include:
+### Delivery and acknowledgement
+
+Human-to-PTY tasks default to `inject`; ACP targets use `prompt`. Agent-to-PTY tasks retain `claim` by default and can explicitly request `--delivery inject`. Existing PTY tasks without a delivery field retain claim semantics.
 
 ```sh
-# Run inside a pane created by wtable. Do not copy or print credentials.
-"$WTABLE_CLI" peers
-"$WTABLE_CLI" next --timeout 30s
-"$WTABLE_CLI" result TASK_ID 'Review complete. Findings follow...'
-"$WTABLE_CLI" send reviewer 'Please review these changes'
+./bin/wtable send --delivery inject coder 'Review these changes'
+./bin/wtable send --delivery claim coder 'Work to claim explicitly'
+./bin/wtable send --queue coder 'Deliver once the gate allows it'
 ```
 
-`next` returns task JSON, or `null` when no task is available. A pane can claim one task at a time. To submit a result through standard input, use `printf '%s' "$result" | "$WTABLE_CLI" result TASK_ID -`.
+Injection checks process liveness, blocked text, output settling, and previous unacknowledged injection. Defaults are 400ms settling, 3s verification, and 90s ACK timeout. Direct `codex`, `claude`, and `agy` commands use built-in blocked-text patterns. Other programs or wrappers can configure their own:
 
-The same sender, `--key`, and task content return the original task. Reusing a key with different content is rejected. A dispatched task whose outcome cannot be confirmed is marked `unknown` and is not automatically redelivered. `cancelling` means cancellation has been requested but the agent has not yet confirmed it.
+```sh
+./bin/wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
+  --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
+```
+
+Rejection returns `blocked:<line>`, `busy:<task>`, or `not-ready` without writing input. Explicit `--queue` retains work until the gate permits delivery. Bracketed-paste applications receive a complete envelope in one submission; other applications receive a single-line JSON envelope with the task ID, prompt, and acknowledgement instructions. The target terminal may limit long input lines; the complete prompt remains available through `task TASK_ID`.
+
+`delivered` proves a write or protocol dispatch, not that the agent has accepted work. A PTY receiver calls `ack` to become `accepted`, or submits a result directly as evidence. Echo-only verification records `write-unconfirmed`. ACK timeout becomes `unknown`, never an automatic retry. ACP becomes accepted on the first update for the active turn and completes on the prompt response; CLI `result` is unnecessary.
+
+Each pane receives `WTABLE_CLI`, `WTABLE_PANE_ID`, `WTABLE_PEER_TOKEN`, and `WTABLE_HOME`. Run these commands inside the agent pane without copying or printing credentials:
+
+```sh
+"$WTABLE_CLI" ack TASK_ID
+"$WTABLE_CLI" result TASK_ID 'Actual result'
+# Claim mode takes one queued task at a time and retains the running state value.
+"$WTABLE_CLI" next --timeout 30s
+"$WTABLE_CLI" send --delivery inject reviewer 'Review these changes'
+```
+
+Results can also be submitted through stdin. Delivered, accepted, unknown, cancelled, failed, and legacy running tasks accept late results; completed tasks reject overwrites. Reusing a sender's deduplication key with identical content returns the original task; conflicting content is rejected.
+
+### Reports and follow-up work
+
+```sh
+./bin/wtable send --on-complete notify --report-to reviewer coder 'Analyze and notify reviewer'
+./bin/wtable send --on-complete handoff --report-to reviewer coder 'Prepare work for reviewer'
+./bin/wtable reports
+./bin/wtable report REPORT_ID
+./bin/wtable report seen REPORT_ID
+```
+
+`notify` writes only an inbox report: no terminal input and no new task. `handoff` creates a task with `ParentTask`, preserving the original sender and normal delivery checks. No report target defaults to `none`; specifying a target without a mode defaults to `notify`.
+
+The original sender's grant to the report target is checked at creation and completion. A revoked grant produces a readable `undeliverable` report. Completion and the single report for each parent are persisted together. Summaries are capped at 4KiB; full parent results remain accessible only to the original participants and controller.
+
+### Manual recovery
+
+```sh
+./bin/wtable task confirm TASK_ID
+./bin/wtable task done TASK_ID 'Actual outcome confirmed by a person'
+./bin/wtable task fail TASK_ID 'Failure reason'
+./bin/wtable task retry --to reviewer TASK_ID
+./bin/wtable cancel TASK_ID
+# Run only after confirming the PTY work has stopped.
+./bin/wtable cancel --confirmed TASK_ID
+```
+
+Retry accepts failed, unknown, cancelled, or write-unconfirmed tasks, preserves the original record, and links a new task through `RetryOf`. Queued or executing tasks cannot be retried. Retrying write-unconfirmed work marks the old record unknown and still accepts its late result; explicit retry can duplicate work.
+
+Queued tasks cancel immediately; ACP cancellation awaits protocol acknowledgement. Injected PTY work first receives an interrupt and enters `cancelling`, then requires human stop confirmation to become `cancelled`. Terminal history and previous file effects are not erased. Legacy running claim tasks cannot be cancelled reliably; inspect or stop the pane instead.
 
 Links restrict workbench API access, not direct file access by the same operating system user. Worktrees isolate working directories; they are not an operating system sandbox.
 
@@ -129,7 +189,9 @@ The default base is `origin/main` when it exists, otherwise `HEAD`. Use `--base 
 
 Run `wtable changes` or `wtable diff [PATH]` from the target repository to inspect changes. The MVP does not automatically commit, merge, delete, or archive worktrees.
 
-## Recovery and diagnostics
+## Upgrading, recovery, and diagnostics
+
+P0 is version `0.2.0`. The CLI checks the daemon version rather than silently sending new delivery options to an old daemon. Use a separate `WTABLE_HOME` to keep existing sessions running. To reuse a state directory, finish its old sessions, run `shutdown`, then start the new version. Reattaching does not upgrade the daemon; shutdown stops every pane in that state directory.
 
 ```sh
 ./bin/wtable diag
@@ -146,10 +208,11 @@ Run `wtable changes` or `wtable diff [PATH]` from the target repository to inspe
 ## Validation
 
 ```sh
-go test -race ./internal/terminal ./internal/agent
+go test -race ./internal/terminal ./internal/agent ./internal/server
 go vet ./...
 go build -o bin/wtable ./cmd/wtable
 python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.json
+python3 scripts/p0_smoke.py --binary bin/wtable --output .dev/test-results/p0.json
 ```
 
 The smoke script uses a real daemon, PTYs, SQLite, and temporary Git repositories. It asserts authorization behavior, task deduplication, approval effects on files, worktree isolation, and crash recovery. ACP checks use a deterministic local fixture and make no external model calls. The script cleans up its own processes and temporary directories and saves a JSON validation report.
@@ -166,4 +229,4 @@ External provider authentication, adapter compatibility, and session recovery mu
 - Up to 32 panes and 2,000 task records are retained. The structured chat view is bounded; complete task results are stored separately. There is no built-in cleanup command.
 - Notes, role management, an embedded editor, account pools, scheduled tasks, images, and browser portals are planned for later versions.
 
-The original plan and current scope notes are kept locally in `.dev/plan.md`. Both `.dev/` and `bin/` are ignored by Git.
+P0 delivery and reporting are implemented. The P1 creation panel and brief onboarding, and P2 Graph, are not yet implemented. `docs/`, `.dev/`, and `bin/` remain outside the Git allowlist.

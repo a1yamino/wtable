@@ -262,7 +262,7 @@ def run(args):
         assert delivered["from"] == peer["id"] and delivered["result"] == "fixture stream result"
         record("pane_credentials_edge_authorization_and_delivery", pane_id=peer["id"], task_id=delivered["id"])
 
-        queued = send(peer["id"], "bridge task", "pty-bridge")
+        queued = rpc.call("task.send", {"to": peer["id"], "prompt": "bridge task", "dedupe_key": "pty-bridge", "delivery_mode": "claim"})
         claimed = peer_call("task.next", {})
         assert claimed["result"]["id"] == queued["id"]
         assert claimed["result"]["state"] == "running"
@@ -300,7 +300,7 @@ def run(args):
 
         marker = root / "hold-executions.txt"
         held = send(agent["id"], "hold:" + str(marker), "crash-running")
-        wait_until(lambda: task(held["id"])["state"] == "running" and marker.exists(), "running task before crash")
+        wait_until(lambda: task(held["id"])["state"] == "accepted" and marker.exists(), "accepted ACP task before crash")
         assert marker.read_text().splitlines() == ["prompt-started"]
         rpc.close()
         rpc = None

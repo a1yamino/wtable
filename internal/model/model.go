@@ -42,20 +42,30 @@ type Message struct {
 	At   time.Time `json:"at"`
 }
 
+// DeliveryConfig controls the heuristic PTY gate; zero values select defaults.
+type DeliveryConfig struct {
+	BlockedRegex string `json:"blocked_regex,omitempty"`
+	TailLines    int    `json:"tail_lines,omitempty"`
+	SettleMS     int    `json:"settle_ms,omitempty"`
+	VerifyMS     int    `json:"verify_ms,omitempty"`
+	AckTimeoutMS int    `json:"ack_timeout_ms,omitempty"`
+}
+
 type Pane struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Backend   string    `json:"backend"` // pty or acp
-	Command   []string  `json:"command"`
-	Cwd       string    `json:"cwd"`
-	State     string    `json:"state"` // starting, running, exited, failed, interrupted
-	TurnState string    `json:"turn_state,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	ExitCode  *int      `json:"exit_code,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	Messages  []Message `json:"messages,omitempty"`
-	Frame     *Frame    `json:"frame,omitempty"`
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Backend        string         `json:"backend"` // pty or acp
+	Command        []string       `json:"command"`
+	Cwd            string         `json:"cwd"`
+	State          string         `json:"state"` // starting, running, exited, failed, interrupted
+	TurnState      string         `json:"turn_state,omitempty"`
+	SessionID      string         `json:"session_id,omitempty"`
+	Error          string         `json:"error,omitempty"`
+	ExitCode       *int           `json:"exit_code,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	Messages       []Message      `json:"messages,omitempty"`
+	Frame          *Frame         `json:"frame,omitempty"`
+	DeliveryConfig DeliveryConfig `json:"delivery_config,omitempty"`
 }
 
 type Edge struct {
@@ -64,15 +74,52 @@ type Edge struct {
 }
 
 type Task struct {
-	ID        string    `json:"id"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	Prompt    string    `json:"prompt"`
-	State     string    `json:"state"` // queued, running, completed, failed, unknown, cancelled
-	Result    string    `json:"result,omitempty"`
-	DedupeKey string    `json:"dedupe_key,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID             string     `json:"id"`
+	From           string     `json:"from"`
+	To             string     `json:"to"`
+	Prompt         string     `json:"prompt"`
+	State          string     `json:"state"` // queued, delivered, accepted, completed, failed, unknown, cancelling, cancelled
+	DeliveryMode   string     `json:"delivery_mode,omitempty"`
+	DeliveryStatus string     `json:"delivery_status,omitempty"`
+	DeliveryError  string     `json:"delivery_error,omitempty"`
+	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
+	AcceptedAt     *time.Time `json:"accepted_at,omitempty"`
+	OnComplete     string     `json:"on_complete,omitempty"`
+	ReportTo       string     `json:"report_to,omitempty"`
+	ParentTask     string     `json:"parent_task,omitempty"`
+	Origin         string     `json:"origin,omitempty"`
+	RetryOf        string     `json:"retry_of,omitempty"`
+	ReportID       string     `json:"report_id,omitempty"`
+	Seen           bool       `json:"seen"`
+	Result         string     `json:"result,omitempty"`
+	DedupeKey      string     `json:"dedupe_key,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type SendParams struct {
+	To           string `json:"to"`
+	Prompt       string `json:"prompt"`
+	DedupeKey    string `json:"dedupe_key,omitempty"`
+	DeliveryMode string `json:"delivery_mode,omitempty"`
+	Queue        bool   `json:"queue,omitempty"`
+	OnComplete   string `json:"on_complete,omitempty"`
+	ReportTo     string `json:"report_to,omitempty"`
+	ParentTask   string `json:"parent_task,omitempty"`
+}
+
+type Report struct {
+	ID          string    `json:"id"`
+	ParentTask  string    `json:"parent_task"`
+	From        string    `json:"from"`
+	To          string    `json:"to"`
+	State       string    `json:"state"` // delivered or undeliverable
+	Mode        string    `json:"mode"`  // notify or handoff
+	Summary     string    `json:"summary"`
+	Error       string    `json:"error,omitempty"`
+	HandoffTask string    `json:"handoff_task,omitempty"`
+	Seen        bool      `json:"seen"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type PermissionOption struct {
@@ -101,14 +148,16 @@ type Snapshot struct {
 	Edges       []Edge       `json:"edges"`
 	Layers      []Layer      `json:"layers"`
 	Permissions []Permission `json:"permissions"`
+	Reports     []Report     `json:"reports"`
 	Revision    uint64       `json:"revision"`
 }
 
 type SpawnParams struct {
-	Name    string   `json:"name"`
-	Backend string   `json:"backend"`
-	Command []string `json:"command"`
-	Cwd     string   `json:"cwd"`
-	Cols    int      `json:"cols"`
-	Rows    int      `json:"rows"`
+	Name           string         `json:"name"`
+	Backend        string         `json:"backend"`
+	Command        []string       `json:"command"`
+	Cwd            string         `json:"cwd"`
+	Cols           int            `json:"cols"`
+	Rows           int            `json:"rows"`
+	DeliveryConfig DeliveryConfig `json:"delivery_config,omitempty"`
 }

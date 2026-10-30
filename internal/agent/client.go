@@ -38,6 +38,7 @@ type Config struct {
 	SessionID string
 	// OnMessage runs on the protocol reader and must return promptly.
 	OnMessage    func(role, text string)
+	OnUpdate     func()
 	OnPermission func(context.Context, model.Permission) (string, error)
 	OnExit       func(error)
 }
@@ -551,6 +552,12 @@ func (c *Client) handleNotification(msg message) {
 	c.mu.Unlock()
 	if sessionID != "" && p.SessionID != sessionID {
 		return
+	}
+	c.mu.Lock()
+	active := c.active != nil
+	c.mu.Unlock()
+	if active && c.cfg.OnUpdate != nil {
+		c.cfg.OnUpdate()
 	}
 	role, text := "", ""
 	switch p.Update.Type {

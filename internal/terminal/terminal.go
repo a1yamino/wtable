@@ -38,21 +38,22 @@ type Config struct {
 // responses are written outside that lock: a device query can otherwise
 // deadlock the output parser while it is waiting for its reply to be consumed.
 type Terminal struct {
-	mu       sync.Mutex
-	vt       *vt.Emulator
-	modes    map[ansi.Mode]bool
-	revision uint64
-	pty      *os.File
-	cmd      *exec.Cmd
-	cfg      Config
-	inputMu  sync.Mutex
-	stopOnce sync.Once
-	stopped  chan struct{}
-	finished chan struct{}
-	readDone chan struct{}
-	replies  chan []byte
-	errMu    sync.Mutex
-	failure  error
+	mu         sync.Mutex
+	vt         *vt.Emulator
+	modes      map[ansi.Mode]bool
+	revision   uint64
+	lastOutput time.Time
+	pty        *os.File
+	cmd        *exec.Cmd
+	cfg        Config
+	inputMu    sync.Mutex
+	stopOnce   sync.Once
+	stopped    chan struct{}
+	finished   chan struct{}
+	readDone   chan struct{}
+	replies    chan []byte
+	errMu      sync.Mutex
+	failure    error
 }
 
 func Start(ctx context.Context, cfg Config) (*Terminal, error) {
@@ -95,7 +96,7 @@ func Start(ctx context.Context, cfg Config) (*Terminal, error) {
 	}
 	f = pollFile
 	t := &Terminal{
-		vt: vt.NewEmulator(cfg.Cols, cfg.Rows), modes: make(map[ansi.Mode]bool),
+		lastOutput: time.Now(), vt: vt.NewEmulator(cfg.Cols, cfg.Rows), modes: make(map[ansi.Mode]bool),
 		pty: f, cmd: cmd, cfg: cfg, stopped: make(chan struct{}),
 		finished: make(chan struct{}), readDone: make(chan struct{}),
 		replies: make(chan []byte, 128),
@@ -297,6 +298,7 @@ func (t *Terminal) readOutput() {
 		if n > 0 {
 			t.mu.Lock()
 			_, vtErr := t.vt.Write(buf[:n])
+			t.lastOutput = time.Now()
 			t.revision++
 			t.mu.Unlock()
 			t.changed()
@@ -413,4 +415,16 @@ func (t *Terminal) changed() {
 	if t.cfg.OnChange != nil {
 		t.cfg.OnChange()
 	}
+}
+
+// Readiness records real process output only; resize and input do not settle it.
+func (t *Terminal) Readiness() (bool, time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	select {
+	case <-t.stopped:
+		return false, t.lastOutput
+	default:
+	}
+	return syscall.Kill(t.cmd.Process.Pid, 0) == nil, t.lastOutput
 }

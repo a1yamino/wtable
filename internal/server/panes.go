@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,6 +32,14 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			shell = "/bin/zsh"
 		}
 		args.Command = []string{shell}
+	}
+	if args.DeliveryConfig.BlockedRegex != "" {
+		if _, err := regexp.Compile(args.DeliveryConfig.BlockedRegex); err != nil {
+			return model.Pane{}, fmt.Errorf("blocked_regex: %w", err)
+		}
+	}
+	if args.DeliveryConfig.SettleMS < 0 || args.DeliveryConfig.VerifyMS < 0 || args.DeliveryConfig.AckTimeoutMS < 0 || args.DeliveryConfig.TailLines < 0 {
+		return model.Pane{}, errors.New("delivery_config values must not be negative")
 	}
 	if args.Cwd == "" {
 		return model.Pane{}, errors.New("需要工作目录")
@@ -101,7 +110,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			runCancel()
 			return model.Pane{}, errors.New("MVP 最多保留 32 个 pane")
 		}
-		s.state.Panes = append(s.state.Panes, model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, State: "starting", TurnState: "idle", CreatedAt: time.Now()})
+		s.state.Panes = append(s.state.Panes, model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig})
 	}
 	runID := hash(token)
 	s.peerTokens[id] = runID
@@ -145,7 +154,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		}
 		return copy, err
 	}
-	a, err := agent.Start(runCtx, agent.Config{Command: args.Command, Cwd: cwd, Env: env, SessionID: sessionID, OnMessage: func(role, text string) { s.message(id, runID, role, text) }, OnPermission: func(ctx context.Context, p model.Permission) (string, error) { return s.permission(ctx, id, runID, p) }, OnExit: func(err error) { s.paneExited(id, runID, 0, err) }})
+	a, err := agent.Start(runCtx, agent.Config{Command: args.Command, Cwd: cwd, Env: env, SessionID: sessionID, OnUpdate: func() { s.acceptACP(id, runID) }, OnMessage: func(role, text string) { s.message(id, runID, role, text) }, OnPermission: func(ctx context.Context, p model.Permission) (string, error) { return s.permission(ctx, id, runID, p) }, OnExit: func(err error) { s.paneExited(id, runID, 0, err) }})
 	if err != nil {
 		s.failedStart(id, runID, err)
 		return model.Pane{}, err
@@ -232,9 +241,14 @@ func (s *Server) paneExited(id, runID string, code int, err error) {
 	delete(s.peerTokens, id)
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
-		if t.To == id && (t.State == "running" || t.State == "cancelling") {
-			t.State = "unknown"
-			t.Result = "agent 进程退出，执行结果未确认"
+		if t.To == id && activeState(t.State) {
+			if t.State == "cancelling" && taskMode(*t) == "inject" {
+				// Process exit does not replace the human confirmation required by inject cancellation.
+				t.Result = "agent 进程已退出；取消仍待人工确认，已发生的操作不会撤销"
+			} else {
+				t.State = "unknown"
+				t.Result = "agent 进程退出，执行结果未确认"
+			}
 			t.UpdatedAt = time.Now()
 		}
 	}
