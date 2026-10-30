@@ -89,7 +89,7 @@ func (s *Server) readyLocked(p *model.Pane) error {
 		return errors.New("not-ready: 等待终端输出稳定")
 	}
 	for _, t := range s.state.Tasks {
-		if t.To == p.ID && taskMode(t) == "inject" && (t.State == "delivered" || t.State == "cancelling") {
+		if t.To == p.ID && taskMode(t) == "inject" && (t.State == "delivered" || t.State == "accepted" || t.State == "cancelling") {
 			return fmt.Errorf("busy:%s；用 --queue 显式排队", t.ID)
 		}
 	}

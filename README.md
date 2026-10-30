@@ -122,14 +122,14 @@ Human-to-PTY tasks default to `inject`; ACP targets use `prompt`. Agent-to-PTY t
 ./bin/wtable send --queue coder 'Deliver once the gate allows it'
 ```
 
-Injection checks process liveness, blocked text, output settling, and previous unacknowledged injection. Defaults are 400ms settling, 3s verification, and 90s ACK timeout. Direct `codex`, `claude`, and `agy` commands use built-in blocked-text patterns. Other programs or wrappers can configure their own:
+Injection checks process liveness, blocked text, output settling, and previous unfinished injection. Defaults are 400ms settling, 3s verification, and 90s ACK timeout. Direct `codex`, `claude`, and `agy` commands use built-in blocked-text patterns. `gemini`, `opencode`, `grok`, and other programs or wrappers require explicit configuration; they are not validated built-in adapters:
 
 ```sh
 ./bin/wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
   --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
 ```
 
-Rejection returns `blocked:<line>`, `busy:<task>`, or `not-ready` without writing input. Explicit `--queue` retains work until the gate permits delivery. Bracketed-paste applications receive a complete envelope in one submission; other applications receive a single-line JSON envelope with the task ID, prompt, and acknowledgement instructions. The target terminal may limit long input lines; the complete prompt remains available through `task TASK_ID`.
+Rejection returns `blocked:<line>`, `busy:<task>`, or `not-ready` without writing input. Explicit `--queue` retains work until the gate permits delivery. Delivered, accepted, and cancelling injections all hold the busy gate. ACK does not release it, and ACK timeout does not end accepted work. Bracketed-paste applications receive a complete envelope in one submission; other applications receive a single-line JSON envelope with the task ID, prompt, and acknowledgement instructions. The target terminal may limit long input lines; the complete prompt remains available through `task TASK_ID`.
 
 `delivered` proves a write or protocol dispatch, not that the agent has accepted work. A PTY receiver calls `ack` to become `accepted`, or submits a result directly as evidence. Echo-only verification records `write-unconfirmed`. ACK timeout becomes `unknown`, never an automatic retry. ACP becomes accepted on the first update for the active turn and completes on the prompt response; CLI `result` is unnecessary.
 
@@ -155,9 +155,9 @@ Results can also be submitted through stdin. Delivered, accepted, unknown, cance
 ./bin/wtable report seen REPORT_ID
 ```
 
-`notify` writes only an inbox report: no terminal input and no new task. `handoff` creates a task with `ParentTask`, preserving the original sender and normal delivery checks. No report target defaults to `none`; specifying a target without a mode defaults to `notify`.
+`notify` writes only an inbox report: no terminal input and no new task. `handoff` creates a task with `ParentTask`, inheriting the parent's `From` and current `Origin` and applying normal delivery checks. Authorization always uses the original `From`; the parent's `To` and the report's `From` identify the executor. No report target defaults to `none`; specifying a target without a mode defaults to `notify`.
 
-The original sender's grant to the report target is checked at creation and completion. A revoked grant produces a readable `undeliverable` report. Completion and the single report for each parent are persisted together. Summaries are capped at 4KiB; full parent results remain accessible only to the original participants and controller.
+The original sender's grant to the report target is checked at creation and completion. A revoked grant produces a readable `undeliverable` report. Completion and the single report for each parent are persisted together. Summaries are capped at 4KiB without a `ReportMode: full` option; full parent results remain accessible only to the original participants and controller.
 
 ### Manual recovery
 

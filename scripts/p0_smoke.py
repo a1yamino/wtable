@@ -104,9 +104,27 @@ def run(args):
         assert task["state"] == "delivered" and task["delivery_mode"] == "inject"
         wait_until(lambda: task["id"] in screen_text(rpc.call("pane.screen", {"id": receiver["id"]})), "injected envelope")
         assert peer_ok("receiver", "task.ack", {"id": task["id"]})["state"] == "accepted"
+        time.sleep(.05)  # Allow output settling so the busy gate is decisive.
+        count_before = len(rpc.call("task.list"))
+        expect_error(lambda: send(receiver, "BUSY_MUST_NOT_ARRIVE"), "busy:")
+        assert len(rpc.call("task.list")) == count_before
+        queued = send(receiver, "QUEUED_AFTER_ACK", queue=True)
+        assert queued["state"] == "queued"
+        # ACK timeout applies only to unacknowledged delivery, not accepted work.
+        time.sleep(.8)
+        assert get(task)["state"] == "accepted"
+        assert get(queued)["state"] == "queued"
+        pending_screen = screen_text(rpc.call("pane.screen", {"id": receiver["id"]}))
+        assert "BUSY_MUST_NOT_ARRIVE" not in pending_screen
+        assert "QUEUED_AFTER_ACK" not in pending_screen
         peer_ok("receiver", "task.result", {"id": task["id"], "result": "injection complete"})
         assert get(task)["state"] == "completed"
+        wait_until(lambda: get(queued)["state"] == "delivered", "queued delivery after completion")
+        wait_until(lambda: "QUEUED_AFTER_ACK" in screen_text(rpc.call("pane.screen", {"id": receiver["id"]})), "queued input")
+        peer_ok("receiver", "task.ack", {"id": queued["id"]})
+        peer_ok("receiver", "task.result", {"id": queued["id"], "result": "queued work complete"})
         record("inject_ack_result")
+        record("accepted_blocks_injection_and_queue_waits_for_completion")
 
         blocked = spawn("blocked", [sys.executable, "-u", "-c", "import time;print('Log in');time.sleep(60)"], blocked_regex="Log in", settle_ms=10)
         wait_until(lambda: "Log in" in screen_text(rpc.call("pane.screen", {"id": blocked["id"]})), "blocked marker")

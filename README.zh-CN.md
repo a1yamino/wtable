@@ -122,14 +122,14 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 ./bin/wtable send --queue coder '闸门允许后再发送'
 ```
 
-注入前会检查进程、阻塞文案、输出稳定时间和未确认的前一条注入任务。默认稳定窗口为 400ms，写后验证为 3s，ACK 超时为 90s。直接启动 `codex`、`claude`、`agy` 时使用内置阻塞文案；其他程序或包装脚本可自行配置：
+注入前会检查进程、阻塞文案、输出稳定时间和未结束的前一条注入任务。默认稳定窗口为 400ms，写后验证为 3s，ACK 超时为 90s。直接启动 `codex`、`claude`、`agy` 时使用内置阻塞文案；`gemini`、`opencode`、`grok` 和其他程序或包装脚本需要自行配置，暂不属于已验证的内置适配：
 
 ```sh
 ./bin/wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
   --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
 ```
 
-闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；`--queue` 才会保留任务并等待闸门。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
+闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；`--queue` 才会保留任务并等待闸门。前一条注入任务处于 `delivered`、`accepted` 或 `cancelling` 时都算 busy；ACK 不解除 busy，ACK 超时也不会结束已接手的任务。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
 
 `delivered` 只证明写入或协议投递。PTY agent 调用 `ack` 才进入 `accepted`；直接提交结果也可证明已接手。写后只看到回显时记录 `write-unconfirmed`，这不是失败，也不是完成。ACK 超时变为 `unknown`，不自动重投。ACP 首个当前 turn 的更新进入 `accepted`，turn 结束自动完成，不需要 CLI `result`。
 
@@ -156,9 +156,9 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 ./bin/wtable report seen REPORT_ID
 ```
 
-`notify` 只写报告收件箱，绝不写入目标终端，也不创建新任务。`handoff` 创建带 `ParentTask` 的新任务，保留原发送身份并经过正常投递。没有汇报目标时默认 `none`；指定 `ReportTo` 而未指定模式时默认 `notify`。
+`notify` 只写报告收件箱，绝不写入目标终端，也不创建新任务。`handoff` 创建带 `ParentTask` 的新任务，继承父任务的 `From` 和当前 `Origin`，并经过正常投递。授权始终按原 `From` 检查；父任务 `To` 与报告 `From` 记录执行者。没有汇报目标时默认 `none`；指定 `ReportTo` 而未指定模式时默认 `notify`。
 
-汇报目标需要原发送方到目标的授权边，创建和完成时都会检查。撤销授权后报告为 `undeliverable`，摘要仍保存供处理。报告和完成状态一起持久化，同一原任务只生成一份报告。摘要最多 4KiB；完整结果仍只允许原任务收发双方及 controller 读取。
+汇报目标需要原发送方到目标的授权边，创建和完成时都会检查。撤销授权后报告为 `undeliverable`，摘要仍保存供处理。报告和完成状态一起持久化，同一原任务只生成一份报告。摘要最多 4KiB，不提供 `ReportMode: full`；完整结果仍只允许原任务收发双方及 controller 读取。
 
 ### 人工处理
 
