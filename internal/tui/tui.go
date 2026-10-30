@@ -43,6 +43,10 @@ type ui struct {
 	taskDelivery                        string
 	taskQueue                           bool
 	taskScreen                          *model.Frame
+	panel                               *controlPanel
+	panelResults                        chan panelResult
+	activeCwd, activeLayer              string
+	acpInputs                           map[string]*lineEdit
 	pasting                             bool
 	paste                               strings.Builder
 	pendingPaste                        string
@@ -95,6 +99,9 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case result := <-u.panelResults:
+			u.panelFinished(result)
+			u.draw()
 		case ev, ok := <-screen.EventQ():
 			if !ok {
 				return nil
@@ -151,6 +158,10 @@ func (u *ui) call(method string, args, out any) bool {
 	return true
 }
 func (u *ui) refresh() (bool, error) {
+	focusedID := ""
+	if p := u.current(); p != nil {
+		focusedID = p.ID
+	}
 	var next model.Snapshot
 	ids := []string{}
 	for id := range u.boxes {
@@ -163,6 +174,12 @@ func (u *ui) refresh() (bool, error) {
 	}
 	changed := !reflect.DeepEqual(u.snapshot, next)
 	u.snapshot = next
+	for i, p := range next.Panes {
+		if p.ID == focusedID {
+			u.focus = i
+			break
+		}
+	}
 	if u.taskDetail != nil {
 		for _, t := range next.Tasks {
 			if t.ID == u.taskDetail.ID && !t.UpdatedAt.Equal(u.taskDetail.UpdatedAt) {
@@ -199,7 +216,14 @@ func (u *ui) spawn(command []string) bool {
 		command = []string{shell}
 	}
 	var pane model.Pane
-	if u.call("pane.spawn", model.SpawnParams{Backend: "pty", Command: command, Cwd: u.cwd, Cols: 80, Rows: 24}, &pane) {
+	cwd := u.activeCwd
+	if cwd == "" {
+		cwd = u.cwd
+	}
+	if u.activeLayer != "" {
+		cwd = ""
+	}
+	if u.call("pane.spawn", model.SpawnParams{Backend: "pty", Command: command, Cwd: cwd, Layer: u.activeLayer, Cols: 80, Rows: 24}, &pane) {
 		u.focus = len(u.snapshot.Panes)
 		u.status = "已新建终端 " + pane.Name
 		return true
@@ -216,6 +240,15 @@ func (u *ui) send(data string) {
 }
 func (u *ui) handlePaste(data string) {
 	u.selection = nil
+	if u.panel != nil && !u.taskView && u.mode == "" {
+		if u.panel.form != "" && !u.panel.busy && len(u.snapshot.Permissions) == 0 {
+			f := &u.panel.fields[u.panel.field]
+			if len(f.options) == 0 && !f.multi {
+				f.edit.Insert(data)
+			}
+		}
+		return
+	}
 	if (u.taskView && u.mode == "") || u.help || u.pendingPaste != "" {
 		return
 	}
@@ -232,7 +265,7 @@ func (u *ui) handlePaste(data string) {
 		return
 	}
 	if p.Backend == "acp" {
-		u.openInput("task", data)
+		u.acpInput(p.ID).Insert(data)
 		return
 	}
 	if p.Frame != nil && p.Frame.BracketedPaste {
@@ -289,6 +322,10 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		u.taskKey(e)
 		return false
 	}
+	if u.panel != nil {
+		u.panelKey(e)
+		return false
+	}
 	if u.copyMode {
 		p := u.current()
 		if p == nil {
@@ -322,13 +359,14 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		case "?":
 			u.help = true
 		case "a":
-			u.send("\x01")
+			u.openPanel(0)
 		case "n":
 			u.spawn(nil)
 			_, _ = u.refresh()
 			u.resize()
 		case "c":
-			u.openInput("command", "")
+			u.openPanel(0)
+			u.panel.afterLoad = "custom"
 		case "o":
 			if len(u.snapshot.Panes) > 0 {
 				u.focus = (u.focus + 1) % len(u.snapshot.Panes)
@@ -346,13 +384,15 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		case "[":
 			u.copyMode = true
 		case "t":
-			u.openInput("task", "")
+			u.openPanel(2)
+			u.panel.afterLoad = "send"
 		case "g":
-			u.openInput("edge", "")
+			u.openPanel(1)
+			u.panel.afterLoad = "edge"
 		case "r":
-			u.openInput("unedge", "")
+			u.openPanel(1)
 		case "k":
-			u.openTasks()
+			u.openPanel(2)
 		case "R":
 			u.restartCurrent()
 		case "x":
@@ -376,9 +416,7 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		return false
 	}
 	if p != nil && p.Backend == "acp" {
-		if k == tcell.KeyEnter || (k == tcell.KeyRune && s != "") {
-			u.openInput("task", s)
-		}
+		u.acpKey(e, p)
 		return false
 	}
 	app := p != nil && p.Frame != nil && p.Frame.AppCursor

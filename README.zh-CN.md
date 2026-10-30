@@ -51,6 +51,52 @@ ACP 任务会自动执行，输出、工具步骤和权限请求显示在 TUI �
 
 PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之间切换，也不从终端静默或输出格式推断任务完成。
 
+## 控制面板与 Agent 接入
+
+按 `Ctrl-a a` 打开面板，Tab / Shift-Tab 切换页面，方向键或滚轮选择条目，Esc 逐级返回。
+
+| 页面 | 操作 |
+|---|---|
+| Agents | `a` 添加、`e` 编辑名字/角色/账号、`d` 移除、Enter 跳转、`v` 预览说明、`b` 重发说明、`l` 诊断、`R` 重启 |
+| Edges | `a` 选择来源和多个目标、`x` 删除、`t` 只看当前 pane 相关的边 |
+| Tasks | `s` 多目标派活、Enter 详情、`r` 重发、`x` 取消、`b` 报告收件箱 |
+| Layers | `n` 创建 worktree、Enter 将选中目录设为新 pane 的默认目录 |
+
+添加 Agent 时可选择预设、PTY/ACP、目录、Layer、角色、账号档案、是否注入说明，以及新 Agent 可以派活给哪些已有 pane。自定义命令支持引号和转义来组合参数，不展开变量或执行 shell 语法。需要 shell 时请显式填写 `/bin/zsh -lc '命令'`。
+
+内置预设包括 Shell、Codex PTY、Codex ACP、Claude PTY 和 Agy PTY。探测只检查本地二进制，并对已知程序运行限时 `--version`；不会修改登录态。未安装 `codex-acp` 时明确显示不可用，不自动下载。找到二进制不等于已验证登录或协议兼容。
+
+```sh
+./bin/wtable presets
+./bin/wtable recruit coder --preset codex-pty --role '实现与验证' --brief
+./bin/wtable recruit reviewer --preset codex-acp --role '只读复核' --brief --connect coder
+./bin/wtable brief coder
+./bin/wtable brief send coder
+./bin/wtable pane edit --role '负责重试逻辑' coder
+```
+
+面板选择非 Shell 预设时默认启用身份说明；CLI 的 `--brief` 显式开启。说明不超过 2048 UTF-8 字节，保存在 `<WTABLE_HOME>/briefs/<pane>.md`，权限为 `0600`。启用时通过 `WTABLE_BRIEF` 暴露路径，并经 P0 闸门排队投递。内容包括身份、目录、角色、当前有权联系的 peer 和回报约定，不包含凭据。PTY 说明要求 `ack/result`；ACP 由协议自动回报，不要求额外调用 CLI。重启不会自动重放已有说明，可显式重发。
+
+ACP pane 底部有常驻输入框，直接输入并按 Enter 即通过原任务队列提交，复用当前 session；Alt-Enter 换行，粘贴插入光标处。权限请求始终优先，Enter 不批准。
+
+编辑运行中的 pane 可以修改名字与角色；账号只能在退出、失败或中断后修改。命令、后端和目录变更需要重新创建。移除前须按 `y` 确认：进程停止、相关排队任务取消、授权边移除，任务/报告/brief 历史保留。非零退出显示 `failed`、退出码、脱敏后的尾部摘要和日志路径；正常退出码 0 保留 `exited`。
+
+### 本地预设与账号档案
+
+可在 `<WTABLE_HOME>/presets.json` 定义额外预设，ID 不得与内置预设重复。自定义程序只检查可执行性，不主动运行它探测版本：
+
+```json
+[{"id":"custom-agent","name":"Custom agent","backend":"pty","command":["/absolute/path/to/agent","--flag"]}]
+```
+
+账号档案从 `<WTABLE_HOME>/accounts.json` 读取，不自动扫描账号或登录。界面、快照和 brief 只保存档案名称，不返回环境变量值；`WTABLE_*` 保留变量不可覆盖：
+
+```json
+[{"name":"work","env":{"CODEX_HOME":"/absolute/path/to/codex-profile"}}]
+```
+
+配置变更不会修改已运行进程的环境。Layer 的默认选择仅在当前 TUI 会话内保留。
+
 ## 键盘操作
 
 下列命令先按 `Ctrl-a`，再按对应键：
@@ -59,19 +105,20 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 |---|---|
 | `?` | 查看帮助 |
 | `n` | 新建 shell |
-| `c` | 输入 shell 命令并创建 pane |
+| `a` | 打开 Agents / Edges / Tasks / Layers 控制面板 |
+| `c` | 打开自定义 Agent 表单；命令按 argv 执行，不经过 shell |
 | `o` | 切换聚焦 pane |
 | `s` | 切换网格、左右、上下布局 |
 | `z` | 放大当前 pane／恢复布局 |
 | `b` | 显示或隐藏任务栏 |
 | `[` | 回看模式，使用方向键或 `j/k` 滚动；`y` 复制可见文本，`q` 退出 |
-| `t` | 向当前 pane 提交任务；Tab 切换 PTY 的 inject/claim，Ctrl-Q 切换显式排队 |
-| `g` / `r` | 新增／删除单向授权边，输入来源与目标 pane |
-| `k` | 打开任务列表：↑↓ 选择、Enter 查看详情、`c` 请求取消、Esc 返回 |
+| `t` | 打开多目标派活表单，选择投递、排队和汇报方式 |
+| `g` / `r` | 打开加边选择器／授权边列表，无需输入 ID |
+| `k` | 打开 Tasks 页：Enter 详情、`r` 重发、`x` 取消、`b` 报告 |
 | `x` | 停止当前 pane，输入 `y` 确认 |
 | `R` | 原地重启已退出、失败或中断的 pane |
 | `d` / `q` | detach，保留后台会话 |
-| `a` | 将原始 `Ctrl-a` 发送给当前终端 |
+| `Ctrl-a` | 将原始 `Ctrl-a` 发送给当前终端，即连续按两次 |
 
 鼠标左键点击 pane 的标题或内容即可聚焦；按住分隔线拖动可调整大小，网格布局按整行、整列调整。调整比例在当前 TUI 中保留，切换布局或增减 pane 时恢复均分；放大再恢复不会丢失比例。弹窗打开时不响应鼠标聚焦和拖动。
 
@@ -81,7 +128,7 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 
 输入框支持左右移动、Home/End（或 Ctrl-A/E）定位行首尾、Delete/Backspace 删除、Ctrl-U 删除到行首、Ctrl-W 删除前一个词；粘贴插入光标处。↑↓ 浏览当前输入类型的历史，历史仅在本次 TUI 中保存。任务支持 Alt-Enter 换行。提交失败时保留输入供修正。
 
-`Ctrl-a t` 向当前 pane 发送任务，成功后显示目标名称和真实状态，并展开任务栏。`Ctrl-a k` 打开任务列表，Enter 或点击任务可查看完整内容与结果。详情支持滚轮和翻页，并提供以下操作：
+`Ctrl-a t` 打开派活表单，默认勾选当前 pane。Tab 切换字段，左右键选择选项，Space 多选目标，Enter 提交。多目标发送若部分失败，只保留未发送成功的目标，继续提交不会重复成功项。`Ctrl-a k` 打开 Tasks 页，Enter 查看完整任务与结果；详情支持滚轮和翻页，并提供以下操作：
 
 | 详情按键 | 操作 |
 |---|---|
@@ -92,7 +139,7 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 | `c` / `x` | 请求取消 |
 | `C` | 确认注入任务已经停止，输入 `y` 才生效 |
 
-任务列表按 Tab 切到报告收件箱。报告显示未读和 `undeliverable` 状态；Enter 查看摘要，再按 Enter 查看原任务（仍需原任务读取权限）。原始输入支持 `<Enter>`、`<Esc>`、`<Ctrl-C>` 和方向键标记，不自动追加回车。
+Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` 状态；Enter 查看摘要，再按 Enter 查看原任务（仍需原任务读取权限）。原始输入支持 `<Enter>`、`<Esc>`、`<Ctrl-C>` 和方向键标记，不自动追加回车。
 
 已退出的 pane 显示重启入口：聚焦后按 Enter、点击入口行，或按 `Ctrl-a R` 原地重启。重启保留 pane ID、名称与授权边，并重新执行原启动命令；PTY 的聊天历史恢复取决于原命令是否包含对应 Agent 的 resume 参数。
 
@@ -192,7 +239,7 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 
 ## 升级、恢复与诊断
 
-P0 版本为 `0.2.0`。CLI 会检查 daemon 版本，不会把新投递参数交给旧 daemon 静默忽略。保留旧会话时，请为新版使用独立的 `WTABLE_HOME`；需要沿用原目录时，先结束旧会话并执行 `shutdown`，再启动新版。仅重新 attach 不会升级后台 daemon，`shutdown` 会停止该目录下的全部 pane。
+当前版本为 `0.3.0`。CLI 会检查 daemon 版本，不会把新投递参数交给旧 daemon 静默忽略。保留旧会话时，请为新版使用独立的 `WTABLE_HOME`；需要沿用原目录时，先结束旧会话并执行 `shutdown`，再启动新版。仅重新 attach 不会升级后台 daemon，`shutdown` 会停止该目录下的全部 pane。
 
 ```sh
 ./bin/wtable diag
@@ -214,6 +261,7 @@ go vet ./...
 go build -o bin/wtable ./cmd/wtable
 python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.json
 python3 scripts/p0_smoke.py --binary bin/wtable --output .dev/test-results/p0.json
+python3 scripts/p1_smoke.py --binary bin/wtable --output .dev/test-results/p1.json
 ```
 
 smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授权、任务去重、审批文件效果、worktree 隔离与崩溃恢复。ACP 部分使用本地确定性 fixture，不调用外部模型。测试会清理自建的进程和临时目录，并保留 JSON 验收报告。
@@ -227,7 +275,7 @@ smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授�
 - 使用完整 cell 快照轮询，尚未实现 cell 差分与事件重放；原计划中的性能预算尚未验收。
 - 支持可见内容的鼠标选区复制、键盘回看和复制可见屏；支持向启用鼠标协议的应用转发滚轮，暂不转发点击和拖动，也不支持 OSC 52 剪贴板协议。
 - pane 的排列、大小比例、焦点和 zoom 属于当前 TUI 状态，detach 后会按已有 pane 重新布局。
-- 最多保留 32 个 pane、2,000 条任务；结构化聊天视图有大小上限，完整任务结果单独保存。没有内置清理命令。
+- 最多保留 32 个 pane、2,000 条任务；pane 可从 Agents 页移除，任务历史尚无清理命令。结构化聊天视图有大小上限，完整任务结果单独保存。
 - notes、角色管理、内置编辑器、账号池、计划任务、图片和浏览器门户属于后续范围。
 
-当前实现完成 P0 送达与回传；P1 创建面板、身份说明接入和 P2 Graph 尚未实现。`docs/`、`.dev/` 和 `bin/` 均由 Git 白名单规则忽略。
+当前实现完成 P0 送达与回传，以及 P1 控制面板和身份说明接入；P2 Graph 尚未实现。`docs/`、`.dev/` 和 `bin/` 均由 Git 白名单规则忽略。

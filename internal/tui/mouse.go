@@ -54,6 +54,12 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 		u.selection = nil
 		return
 	}
+	if u.panel != nil && !u.taskView {
+		u.drag = nil
+		u.selection = nil
+		u.panelMouse(e, pressed)
+		return
+	}
 	if u.taskView {
 		u.drag = nil
 		u.selection = nil

@@ -99,7 +99,7 @@ func run(args []string) error {
 	call := func(method string, args, result any) error { return c.Call(ctx, method, args, result) }
 	jsonMode := false
 	// Free-form prompts and child command arguments must remain byte-for-byte.
-	if args[0] != "new" && args[0] != "recruit" && args[0] != "send" && args[0] != "ask" && args[0] != "next" && args[0] != "result" && args[0] != "wait" && args[0] != "input" && args[0] != "task" && args[0] != "cancel" {
+	if args[0] != "new" && args[0] != "recruit" && args[0] != "send" && args[0] != "ask" && args[0] != "next" && args[0] != "result" && args[0] != "wait" && args[0] != "input" && args[0] != "task" && args[0] != "cancel" && args[0] != "pane" {
 		clean := make([]string, 0, len(args))
 		for _, arg := range args {
 			if arg == "--json" {
@@ -140,13 +140,76 @@ func run(args []string) error {
 			return err
 		}
 		return printJSON(panes)
+	case "presets":
+		if len(args) != 1 {
+			return errors.New("用法：wtable presets [--json]")
+		}
+		var catalog model.Catalog
+		if err = call("preset.list", nil, &catalog); err != nil {
+			return err
+		}
+		if jsonMode {
+			return printJSON(catalog)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\t名称\t后端\t可用\t版本\t说明")
+		for _, p := range catalog.Presets {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\t%s\n", p.ID, p.Name, p.Backend, p.Available, p.Version, p.Detail)
+		}
+		if err = w.Flush(); err != nil {
+			return err
+		}
+		if len(catalog.Accounts) > 0 {
+			fmt.Println("账号：" + strings.Join(catalog.Accounts, "、"))
+		}
+		return nil
+	case "pane":
+		return paneCommand(args[1:], call)
+	case "remove":
+		if len(args) != 2 {
+			return errors.New("用法：wtable remove PANE")
+		}
+		var out any
+		if err = call("pane.remove", map[string]string{"id": args[1]}, &out); err != nil {
+			return err
+		}
+		return printJSON(out)
+	case "brief":
+		method, target := "pane.brief", ""
+		if len(args) == 2 {
+			target = args[1]
+		} else if len(args) == 3 && args[1] == "send" {
+			method, target = "pane.brief.send", args[2]
+		} else {
+			return errors.New("用法：wtable brief PANE | wtable brief send PANE")
+		}
+		var out any
+		if err = call(method, map[string]string{"id": target}, &out); err != nil {
+			return err
+		}
+		return printJSON(out)
 	case "new", "recruit":
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
 		name := fs.String("name", "", "pane 名称")
 		dir := fs.String("dir", cwd, "工作目录")
-		backend := fs.String("backend", "pty", "pty 或 acp")
-		layer := fs.String("layer", "", "已有 layer 名称")
+		backend := fs.String("backend", "", "pty 或 acp（默认使用预设后端，否则 pty）")
+		preset := fs.String("preset", "", "启动预设 ID")
+		role := fs.String("role", "", "角色说明")
+		account := fs.String("account", "", "已配置的账号名称")
+		brief := fs.Bool("brief", false, "通过任务通道注入接入说明")
+		var connectTo []string
+		fs.Func("connect", "授权新 pane 向目标投递；可重复或用逗号分隔", func(value string) error {
+			for _, target := range strings.Split(value, ",") {
+				target = strings.TrimSpace(target)
+				if target == "" {
+					return errors.New("--connect 的目标不能为空")
+				}
+				connectTo = append(connectTo, target)
+			}
+			return nil
+		})
+		layer := fs.String("layer", "", "已有 layer 名称或路径（重名时使用路径）")
 		blockedRegex := fs.String("blocked-regex", "", "阻塞界面的正则表达式")
 		tailLines := fs.Int("tail-lines", 0, "检测屏幕末尾行数（0 使用默认 12）")
 		settle := fs.Duration("settle", 0, "投递前输出稳定时间（0 使用默认 400ms）")
@@ -165,35 +228,24 @@ func run(args []string) error {
 			return err
 		}
 		if *layer != "" {
-			var state model.Snapshot
-			if err = call("state.get", map[string]bool{"frames": false}, &state); err != nil {
-				return err
-			}
-			found := false
-			for _, l := range state.Layers {
-				if l.Name == *layer {
-					if found {
-						return errors.New("多个仓库有同名 layer，请用 --dir 明确路径")
-					}
-					abs = l.Path
-					found = true
-				}
-			}
-			if !found {
-				return errors.New("layer 不存在")
+			dirSet := false
+			fs.Visit(func(f *flag.Flag) { dirSet = dirSet || f.Name == "dir" })
+			if !dirSet {
+				abs = "" // The server resolves the layer and chooses its directory.
 			}
 		}
 		command := fs.Args()
-		if len(command) == 0 && args[0] == "recruit" {
-			return errors.New("recruit 需要 -- 后的 agent 启动命令")
+		if len(command) == 0 && *preset == "" && args[0] == "recruit" {
+			return errors.New("recruit 需要 --preset ID 或 -- 后的 agent 启动命令")
 		}
 		var p model.Pane
 		spawnCtx, stop := context.WithTimeout(ctx, 45*time.Second)
 		defer stop()
-		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24, DeliveryConfig: model.DeliveryConfig{
-			BlockedRegex: *blockedRegex, TailLines: *tailLines, SettleMS: int(settle.Milliseconds()),
-			VerifyMS: int(verify.Milliseconds()), AckTimeoutMS: int(ackTimeout.Milliseconds()),
-		}}, &p)
+		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24,
+			Preset: *preset, Role: *role, Account: *account, Layer: *layer, InjectBrief: *brief, ConnectTo: connectTo, DeliveryConfig: model.DeliveryConfig{
+				BlockedRegex: *blockedRegex, TailLines: *tailLines, SettleMS: int(settle.Milliseconds()),
+				VerifyMS: int(verify.Milliseconds()), AckTimeoutMS: int(ackTimeout.Milliseconds()),
+			}}, &p)
 		if err != nil {
 			return err
 		}
@@ -496,6 +548,64 @@ func run(args []string) error {
 	}
 }
 
+// paneCommand preserves omitted metadata fields when editing a pane.
+func paneCommand(args []string, call func(string, any, any) error) error {
+	if len(args) == 0 || args[0] != "edit" {
+		return errors.New("用法：wtable pane edit [--name NAME] [--role TEXT] [--account NAME] PANE")
+	}
+	fs := flag.NewFlagSet("pane edit", flag.ContinueOnError)
+	name := fs.String("name", "", "pane 名称")
+	role := fs.String("role", "", "角色说明（空字符串清除）")
+	account := fs.String("account", "", "已配置的账号名称（空字符串清除）")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || fs.NFlag() == 0 {
+		return errors.New("用法：wtable pane edit [--name NAME] [--role TEXT] [--account NAME] PANE；至少指定一个选项")
+	}
+	var state model.Snapshot
+	if err := call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+		return err
+	}
+	target := fs.Arg(0)
+	var current *model.Pane
+	for i := range state.Panes {
+		if state.Panes[i].ID == target {
+			current = &state.Panes[i]
+			break
+		}
+	}
+	if current == nil {
+		for i := range state.Panes {
+			if state.Panes[i].Name == target {
+				if current != nil {
+					return errors.New("pane 名称不唯一，请使用 pane ID")
+				}
+				current = &state.Panes[i]
+			}
+		}
+	}
+	if current == nil {
+		return fmt.Errorf("pane 不存在：%s", target)
+	}
+	update := model.PaneUpdate{ID: current.ID, Name: current.Name, Role: current.Role, Account: current.Account}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "name":
+			update.Name = *name
+		case "role":
+			update.Role = *role
+		case "account":
+			update.Account = *account
+		}
+	})
+	var out model.Pane
+	if err := call("pane.update", update, &out); err != nil {
+		return err
+	}
+	return printJSON(out)
+}
+
 // taskCommand parses options only before task IDs, preserving free-form result text.
 func taskCommand(args []string, call func(string, any, any) error) error {
 	usage := errors.New("用法：wtable task TASK | task done|fail [--json] TASK TEXT|- | task retry [--to PANE] [--queue] TASK | task confirm|seen|result TASK")
@@ -674,13 +784,23 @@ func short(s string, n int) string {
 	return s
 }
 
-const help = `wtable — macOS 终端 Agent 工作台（MVP）
+const help = `wtable 0.3.0 — macOS 终端 Agent 工作台
 
 启动与终端：
   wtable                                  打开 TUI，自动启动本地 daemon
   wtable attach                           重新接入；Ctrl-a d 退出界面
   wtable new [name] [--dir PATH] -- CMD...  新建真实终端
-  wtable recruit NAME [--backend pty|acp] [--dir PATH] [--layer NAME] -- CMD...
+  wtable recruit [NAME] [OPTIONS] [-- CMD...]
+    --preset ID --backend pty|acp --dir PATH --layer NAME|PATH
+    --role TEXT --account NAME --brief --connect TARGET
+    --connect 可重复或用逗号分隔；方向为新 pane → TARGET
+    layer 重名时使用路径；与 --dir 同时使用时目录必须位于该层内
+    recruit 需要预设或启动命令；new 省略两者时打开默认 shell
+  wtable presets [--json]                  探测本机预设与账号名称
+  wtable pane edit [--name NAME] [--role TEXT] [--account NAME] PANE
+  wtable remove PANE                       移除 pane 并取消相关排队任务
+  wtable brief PANE                        查看接入说明（JSON）
+  wtable brief send PANE                   通过任务通道发送接入说明
   wtable list [--json]                     查看 pane
   wtable screen PANE                      读取终端画面
   wtable stop PANE | restart PANE          停止或显式恢复
@@ -717,9 +837,10 @@ Git 与运维：
 
 选项放在位置参数前（layer create 的选项放在名称后）；CMD 放在 -- 后。
 设置 WTABLE_HOME 可使用独立状态目录。默认使用 macOS Application Support/wtable。
+new/recruit 均接受预设、角色、账号、brief 与连线选项；--brief 默认关闭。
 new/recruit 可配置 --blocked-regex REGEX --tail-lines N --settle 400ms --verify 3s --ack-timeout 90s。
 省略送达方式时：ACP 使用 prompt，人工向 PTY 使用 inject，peer 向 PTY 使用 claim。
 PTY inject 收到任务后调用 ack/result；claim 使用 next/result；ACP turn 结束自动完成。
 notify 只生成报告；handoff 才派新任务。unknown 表示缺少接手证据，不自动重试。
-Ctrl-a ? 查看 TUI 快捷键。首版不支持远程、历史 reflow、鼠标选区或账号池。
+Ctrl-a ? 查看 TUI 快捷键。不支持远程、历史 reflow 或鼠标选区。账号仅使用已有本地配置，不自动安装或登录。
 `

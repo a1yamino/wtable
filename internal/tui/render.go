@@ -107,7 +107,7 @@ func (u *ui) draw() {
 	if s := u.selection; s != nil {
 		selectionKey = fmt.Sprintf("%p:%d:%d:%t", s, s.anchor, s.end, s.moved)
 	}
-	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll, u.reportView, u.reportCursor, u.reportDetail, u.taskScreen, u.taskDelivery, u.taskQueue)
+	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll, u.reportView, u.reportCursor, u.reportDetail, u.taskScreen, u.taskDelivery, u.taskQueue, u.panelDrawKey(), u.acpDrawKey())
 	if key == u.lastDrawKey && reflect.DeepEqual(u.snapshot, u.lastDrawSnapshot) {
 		return
 	}
@@ -136,7 +136,7 @@ func (u *ui) draw() {
 		}
 		u.line(r.x, r.y, r.w, title, style)
 		if p.Backend == "acp" {
-			u.drawMessages(p, r)
+			u.drawACP(p, r, i == u.focus)
 			continue
 		}
 		if p.Frame == nil {
@@ -200,14 +200,17 @@ func (u *ui) draw() {
 		status = u.status + " · Ctrl-a ? 帮助"
 	}
 	if u.prefix {
-		status = "Ctrl-a 前缀：? 帮助 n shell c 命令 o 聚焦 s 布局 z 放大 [ 回看 t 任务 d 离开"
+		status = "Ctrl-a 前缀：? 帮助 n shell c 自定义 Agent o 聚焦 s 布局 z 放大 [ 回看 t 任务 d 离开"
 	}
 	if u.copyMode {
 		status = "回看模式：↑↓ / j k 滚动 · PgUp/PgDn 翻页 · y 复制可见屏 · Esc 返回"
 	}
 	u.line(0, h-1, w, status, barStyle)
 	if u.help {
-		u.modal([]string{"wtable 快捷键（先按 Ctrl-a，再按下一键）", "?  帮助；任意键关闭帮助", "n  新建 $SHELL 终端", "c  输入 shell 命令（/bin/zsh -lc 执行）", "o  下一个 pane；s 网格 / 左右 / 上下；z 聚焦放大", "b  切换任务列表；t 给当前 pane 发送任务 / ACP prompt", "g  授权边：来源ID 目标ID；r 删除边", "k  任务列表：Enter 详情、Tab 报告；详情中重发 / 查看屏幕 / 人工处理", "t  发任务：Tab 切换 inject/claim，Ctrl-Q 切换显式排队", "R  原地重启已退出 pane；退出 pane 内 Enter 也可重启", "[  回看模式：↑↓、PgUp/PgDn；y 复制可见屏到剪贴板", "a / Ctrl-a  发送原 Ctrl-a；普通 Ctrl-Z/P 等直达终端", "d / q  离开界面（后台 pane 保持运行）", "输入框：←→ 编辑，Home/End 行首尾，Ctrl-U/W 删除，↑↓ 历史", "Enter 提交；任务 Alt-Enter 换行；Esc 取消", "鼠标：点击 pane 聚焦；拖动分隔线调整行 / 列大小", "拖选 pane 内文字，松开复制；Esc / 点击恢复实时画面", "滚轮回看；应用启用鼠标时转发滚轮，Shift+滚轮强制回看", "MVP：选区限可见屏；点击不转发到 pane 内应用"})
+		u.modal([]string{"wtable 快捷键（先按 Ctrl-a，再按下一键）", "?  帮助；任意键关闭帮助", "n  新建 $SHELL 终端", "a  控制面板：Agents / Edges / Tasks / Layers；c 自定义 Agent", "o  下一个 pane；s 网格 / 左右 / 上下；z 聚焦放大", "b  切换任务列表；t 给当前 pane 发送任务 / ACP prompt", "g  添加授权边选择器；r 授权边列表；t 多目标派活", "k  任务列表：Enter 详情、Tab 报告；详情中重发 / 查看屏幕 / 人工处理", "面板表单：Tab 切字段，←→ 选项，Space 多选，Enter 提交", "R  原地重启已退出 pane；退出 pane 内 Enter 也可重启", "[  回看模式：↑↓、PgUp/PgDn；y 复制可见屏到剪贴板", "Ctrl-a Ctrl-a 发送原 Ctrl-a；普通 Ctrl-Z/P 等直达终端", "d / q  离开界面（后台 pane 保持运行）", "输入框：←→ 编辑，Home/End 行首尾，Ctrl-U/W 删除，↑↓ 历史", "Enter 提交；任务 Alt-Enter 换行；Esc 取消", "鼠标：点击 pane 聚焦；拖动分隔线调整行 / 列大小", "拖选 pane 内文字，松开复制；Esc / 点击恢复实时画面", "滚轮回看；应用启用鼠标时转发滚轮，Shift+滚轮强制回看", "MVP：选区限可见屏；点击不转发到 pane 内应用"})
+	}
+	if u.panel != nil {
+		u.drawPanel()
 	}
 	if u.taskView {
 		u.drawTasks()

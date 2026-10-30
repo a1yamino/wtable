@@ -51,6 +51,28 @@ type DeliveryConfig struct {
 	AckTimeoutMS int    `json:"ack_timeout_ms,omitempty"`
 }
 
+type Preset struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Backend   string   `json:"backend"`
+	Command   []string `json:"command"`
+	Available bool     `json:"available"`
+	Version   string   `json:"version,omitempty"`
+	Detail    string   `json:"detail,omitempty"`
+}
+
+type Catalog struct {
+	Presets  []Preset `json:"presets"`
+	Accounts []string `json:"accounts"`
+}
+
+type PaneUpdate struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Role    string `json:"role"`
+	Account string `json:"account"`
+}
+
 type Pane struct {
 	ID             string         `json:"id"`
 	Name           string         `json:"name"`
@@ -60,6 +82,15 @@ type Pane struct {
 	State          string         `json:"state"` // starting, running, exited, failed, interrupted
 	TurnState      string         `json:"turn_state,omitempty"`
 	SessionID      string         `json:"session_id,omitempty"`
+	Preset         string         `json:"preset,omitempty"`
+	Role           string         `json:"role,omitempty"`
+	Account        string         `json:"account,omitempty"`
+	Layer          string         `json:"layer,omitempty"`
+	InjectBrief    bool           `json:"inject_brief,omitempty"`
+	BriefPath      string         `json:"brief_path,omitempty"`
+	BriefTask      string         `json:"brief_task,omitempty"`
+	ExitSummary    string         `json:"exit_summary,omitempty"`
+	LogPath        string         `json:"log_path,omitempty"`
 	Error          string         `json:"error,omitempty"`
 	ExitCode       *int           `json:"exit_code,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
@@ -153,6 +184,12 @@ type Snapshot struct {
 }
 
 type SpawnParams struct {
+	Preset         string         `json:"preset,omitempty"`
+	Role           string         `json:"role,omitempty"`
+	Account        string         `json:"account,omitempty"`
+	Layer          string         `json:"layer,omitempty"`
+	InjectBrief    bool           `json:"inject_brief,omitempty"`
+	ConnectTo      []string       `json:"connect_to,omitempty"`
 	Name           string         `json:"name"`
 	Backend        string         `json:"backend"`
 	Command        []string       `json:"command"`

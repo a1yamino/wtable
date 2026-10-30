@@ -17,6 +17,22 @@ import (
 )
 
 func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, error) {
+	if restartID == "" {
+		if err := s.resolvePreset(&args); err != nil {
+			return model.Pane{}, err
+		}
+	}
+	if err := s.resolveLayer(&args); err != nil {
+		return model.Pane{}, err
+	}
+	profileEnv, err := s.accountEnv(args.Account)
+	if err != nil {
+		return model.Pane{}, err
+	}
+	if !validMetadata(args.Name, 80) || (args.Name != "" && strings.TrimSpace(args.Name) == "") || !validMetadata(args.Role, 256) {
+		return model.Pane{}, errors.New("名称最多 80 字节、角色最多 256 字节，均不得包含控制字符")
+	}
+
 	if args.Backend == "" {
 		args.Backend = "pty"
 	}
@@ -55,9 +71,6 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 	if !info.IsDir() {
 		return model.Pane{}, errors.New("cwd 不是目录")
 	}
-	if len(args.Name) > 80 || strings.ContainsAny(args.Name, "\n\r\x00") {
-		return model.Pane{}, errors.New("pane 名称过长或包含控制字符")
-	}
 	if args.Cols == 0 {
 		args.Cols = 80
 	}
@@ -85,6 +98,30 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		return model.Pane{}, errors.New("pane 名称已存在")
 	}
 	var sessionID string
+	targets := []string{}
+	for _, ref := range args.ConnectTo {
+		target := s.paneLocked(ref)
+		if target == nil || target.ID == id {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("connect_to 目标不存在或指向自身")
+		}
+		if !contains(targets, target.ID) {
+			targets = append(targets, target.ID)
+		}
+	}
+	candidate := model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, Preset: args.Preset, Role: args.Role, Account: args.Account, Layer: args.Layer, InjectBrief: args.InjectBrief, LogPath: s.paths.Log, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig}
+	brief, briefErr := s.briefTextLocked(candidate, targets)
+	if briefErr != nil {
+		s.mu.Unlock()
+		runCancel()
+		return model.Pane{}, briefErr
+	}
+	if restartID == "" && args.InjectBrief && len(s.state.Tasks) >= 2000 {
+		s.mu.Unlock()
+		runCancel()
+		return model.Pane{}, errors.New("任务记录已满，无法排队 brief")
+	}
 	if restartID != "" {
 		p := s.paneLocked(restartID)
 		if p == nil {
@@ -98,6 +135,14 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			return model.Pane{}, errors.New("pane 仍在运行，请先停止")
 		}
 		sessionID = p.SessionID
+		if err = s.writeBrief(&candidate, brief); err != nil {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, err
+		}
+		p.BriefPath = candidate.BriefPath
+		p.ExitSummary = ""
+		p.LogPath = s.paths.Log
 		p.State = "starting"
 		p.TurnState = "idle"
 		p.Error = ""
@@ -110,7 +155,26 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			runCancel()
 			return model.Pane{}, errors.New("MVP 最多保留 32 个 pane")
 		}
-		s.state.Panes = append(s.state.Panes, model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig})
+		if err = s.writeBrief(&candidate, brief); err != nil {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, err
+		}
+		s.state.Panes = append(s.state.Panes, candidate)
+	}
+	for _, target := range targets {
+		if !s.hasEdgeLocked(id, target) {
+			s.state.Edges = append(s.state.Edges, model.Edge{From: id, To: target})
+		}
+	}
+	if s.diagnosticSecrets == nil {
+		s.diagnosticSecrets = map[string][]string{}
+	}
+	s.diagnosticSecrets[id] = []string{token}
+	for _, value := range profileEnv {
+		if value != "" {
+			s.diagnosticSecrets[id] = append(s.diagnosticSecrets[id], value)
+		}
 	}
 	runID := hash(token)
 	s.peerTokens[id] = runID
@@ -126,6 +190,12 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 	if err != nil {
 		s.failedStart(id, runID, err)
 		return model.Pane{}, err
+	}
+	for key, value := range profileEnv {
+		env = append(env, key+"="+value)
+	}
+	if args.InjectBrief {
+		env = append(env, "WTABLE_BRIEF="+candidate.BriefPath)
 	}
 	if args.Backend == "pty" {
 		t, err := terminal.Start(runCtx, terminal.Config{Command: args.Command, Cwd: cwd, Env: env, Cols: args.Cols, Rows: args.Rows, OnChange: func() { s.revision.Add(1) }, OnExit: func(code int, exitErr error) { s.paneExited(id, runID, code, exitErr) }})
@@ -145,7 +215,13 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		if p.State == "starting" && !cancelled {
 			p.State = "running"
 		}
+		if p.State == "failed" {
+			p.ExitSummary = s.exitSummaryLocked(id)
+		}
 		err = s.saveLocked()
+		if err == nil && restartID == "" && args.InjectBrief && p.State == "running" {
+			_, err = s.enqueueBriefLocked(p, brief)
+		}
 		copy := clonePane(*p)
 		s.mu.Unlock()
 		if cancelled {
@@ -173,6 +249,9 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		p.State = "running"
 	}
 	err = s.saveLocked()
+	if err == nil && restartID == "" && args.InjectBrief && p.State == "running" {
+		_, err = s.enqueueBriefLocked(p, brief)
+	}
 	copy := clonePane(*p)
 	s.mu.Unlock()
 	if cancelled {
@@ -208,7 +287,9 @@ func (s *Server) failedStart(id, runID string, err error) {
 	}
 	if p := s.paneLocked(id); p != nil {
 		p.State = "failed"
-		p.Error = err.Error()
+		p.LogPath = s.paths.Log
+		p.ExitSummary = s.exitSummaryLocked(id)
+		p.Error = s.diagnosticTextLocked(id, err.Error())
 	}
 	delete(s.peerTokens, id)
 	delete(s.runs, id)
@@ -230,9 +311,11 @@ func (s *Server) paneExited(id, runID string, code int, err error) {
 		p.State = "exited"
 		if code != 0 || err != nil {
 			p.State = "failed"
+			p.ExitSummary = s.exitSummaryLocked(id)
+			p.LogPath = s.paths.Log
 		}
 		if err != nil {
-			p.Error = err.Error()
+			p.Error = s.diagnosticTextLocked(id, err.Error())
 		}
 		if p.TurnState == "running" || p.TurnState == "waiting-permission" {
 			p.TurnState = "unknown"

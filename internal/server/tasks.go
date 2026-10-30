@@ -356,7 +356,7 @@ func (s *Server) runQueue(paneID string) {
 		turnCancel()
 		s.mu.Lock()
 		delete(s.taskCancels, taskID)
-		if s.closing {
+		if s.closing || s.runs[paneID] != runID {
 			s.mu.Unlock()
 			return
 		}

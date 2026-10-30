@@ -32,26 +32,30 @@ type approval struct {
 }
 
 type Server struct {
-	mu          sync.Mutex
-	inputLanes  sync.Map
-	paths       config.Paths
-	db          *store.Store
-	state       store.State
-	token       string
-	peerTokens  map[string]string
-	runs        map[string]string
-	terminals   map[string]*terminal.Terminal
-	agents      map[string]*agent.Client
-	approvals   map[string]*approval
-	ctx         context.Context
-	cancel      context.CancelFunc
-	revision    atomic.Uint64
-	writer      uint64
-	storeErr    error
-	connections map[net.Conn]struct{}
-	paneCancels map[string]context.CancelFunc
-	taskCancels map[string]context.CancelFunc
-	closing     bool
+	mu                sync.Mutex
+	inputLanes        sync.Map
+	paths             config.Paths
+	db                *store.Store
+	state             store.State
+	token             string
+	peerTokens        map[string]string
+	runs              map[string]string
+	terminals         map[string]*terminal.Terminal
+	agents            map[string]*agent.Client
+	approvals         map[string]*approval
+	ctx               context.Context
+	cancel            context.CancelFunc
+	revision          atomic.Uint64
+	writer            uint64
+	storeErr          error
+	connections       map[net.Conn]struct{}
+	paneCancels       map[string]context.CancelFunc
+	taskCancels       map[string]context.CancelFunc
+	catalogMu         sync.Mutex
+	catalogAt         time.Time
+	catalogVersions   map[string]string
+	diagnosticSecrets map[string][]string
+	closing           bool
 }
 
 type connection struct {
@@ -424,6 +428,25 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any
 		return true, nil
 	case "state.get":
 		return s.snapshot(raw)
+	case "preset.list":
+		return s.catalog()
+	case "pane.update":
+		var a model.PaneUpdate
+		if err := decode(raw, &a); err != nil {
+			return nil, err
+		}
+		return s.updatePane(a)
+	case "pane.remove", "pane.brief", "pane.brief.send":
+		var a struct {
+			ID string `json:"id"`
+		}
+		if err := decode(raw, &a); err != nil {
+			return nil, err
+		}
+		if method == "pane.remove" {
+			return true, s.removePane(a.ID)
+		}
+		return s.paneBrief(a.ID, method == "pane.brief.send")
 	case "pane.spawn":
 		var p model.SpawnParams
 		if err := decode(raw, &p); err != nil {
@@ -445,7 +468,7 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (any
 		}
 		copy := clonePane(*p)
 		s.mu.Unlock()
-		return s.spawn(model.SpawnParams{Name: copy.Name, Backend: copy.Backend, Command: copy.Command, Cwd: copy.Cwd, DeliveryConfig: copy.DeliveryConfig}, copy.ID)
+		return s.spawn(model.SpawnParams{Name: copy.Name, Backend: copy.Backend, Command: copy.Command, Cwd: copy.Cwd, Preset: copy.Preset, Role: copy.Role, Account: copy.Account, Layer: copy.Layer, InjectBrief: copy.InjectBrief, DeliveryConfig: copy.DeliveryConfig}, copy.ID)
 	case "pane.stop":
 		var a struct {
 			ID string `json:"id"`
