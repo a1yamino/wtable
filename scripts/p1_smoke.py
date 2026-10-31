@@ -172,7 +172,9 @@ def run(args):
         tab(); ready_panel("[Layers]"); send("n"); send("feature"); tab(2); send(b"\r")
         wait_until(lambda: len(state()["layers"]) == 1, "create layer"); ready_panel("[Layers]")
         layer = state()["layers"][0]
-        send(b"\x1b[B\r"); tab(); ready_panel()
+        send(b"\x1b[B")            # select the second layer
+        send(b"\r\r")              # action list → "set as default directory"
+        tab(); ready_panel()
         send("a"); wait_until(lambda: shown("添加 Agent"), "preset picker")
         send("e"); wait_until(lambda: shown("名字"), "agent form")
         send("delta"); send(b"\r" * 11)
@@ -181,7 +183,8 @@ def run(args):
         assert delta["cwd"] == layer["path"] and delta["layer"] == layer["path"]
         record("layer_creation_and_selection_drive_new_agent_directory")
 
-        send(b"\x1b[H\x1b[B\x1b[B\r")  # Focus beta, then remove an earlier pane.
+        send(b"\x1b[H\x1b[B\x1b[B\r")  # Focus beta
+        send(b"\r")                     # action list → open
         send("FOCUS_BEFORE\r")
         def received(p, marker):
             path = root / (p["id"] + ".input")
@@ -210,7 +213,7 @@ def run(args):
         tab(9); send(b"\r")
         wait_until(lambda: pane("chat") and pane("chat")["state"] == "running", "ACP create"); ready_panel()
         chat = pane("chat"); wait_until(lambda: task(chat["brief_task"])["state"] == "completed", "ACP brief completion")
-        send(b"\r"); wait_until(lambda: shown("ACP 输入"), "persistent ACP composer")
+        esc(); send(b"\r"); wait_until(lambda: shown("ACP 输入"), "persistent ACP composer")
         send("direct ACP prompt\r")
         direct = wait_until(lambda: next((t for t in rpc.call("task.list") if t["prompt"] == "direct ACP prompt"), None), "ACP typed task")
         wait_until(lambda: task(direct["id"])["state"] == "completed", "ACP direct result")

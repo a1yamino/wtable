@@ -278,7 +278,9 @@ def run(args):
         prefix("G"); wait_until(lambda: shown("Graph"), "Graph reopened")
         select_node("C")
         wait_until(lambda: preserved["id"] in screen(), "C selected")
-        send(b"\r")
+        send(b"\r")              # open the action list for C
+        wait_until(lambda: shown("做什么"), "node actions")
+        send(b"\r")              # first entry: open
         wait_until(lambda: not shown("Graph"), "node jump exits Graph")
         marker = "GRAPH_JUMP_TARGET_C"
         send(marker + "\r")

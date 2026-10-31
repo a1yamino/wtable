@@ -485,6 +485,14 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 		return
 	}
 	p.selected = min(p.selected, max(0, u.panelCount()-1))
+	// Enter and Space open the action list for the selection; nothing has to be
+	// memorised beyond "pick it, then pick what to do".
+	if p.form == "" && p.confirmKind == "" && p.preview == "" && !p.roleView {
+		if e.Key() == tcell.KeyEnter || e.Str() == " " {
+			u.openActions()
+			return
+		}
+	}
 	switch p.tab {
 	case 0:
 		if e.Str() == "O" {

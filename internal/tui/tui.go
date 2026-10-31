@@ -18,6 +18,7 @@ import (
 
 type rect struct{ x, y, w, h int }
 type ui struct {
+	actions                             *actionMenu
 	ctx                                 context.Context
 	client                              *rpc.Client
 	screen                              tcell.Screen
@@ -333,6 +334,10 @@ func (u *ui) key(e *tcell.EventKey) bool {
 	}
 	if u.mode != "" {
 		u.edit(e)
+		return false
+	}
+	if u.actions != nil {
+		u.actionKey(e)
 		return false
 	}
 	if u.graph != nil {

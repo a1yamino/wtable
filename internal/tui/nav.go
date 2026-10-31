@@ -189,13 +189,13 @@ func (u *ui) statusHint() string {
 	case u.copyMode:
 		return "回看：↑↓ 滚动 PgUp/PgDn 翻页 y 复制 Esc 返回"
 	case u.picker != nil:
-		return "↑↓ 选择 Enter 打开 Esc 返回"
+		return "↑↓ 选择 · Enter 操作 · Esc 返回"
 	case u.panel != nil:
-		return "↑↓ 选择 Tab 换页 Enter 打开 Esc 返回"
+		return "↑↓ 选择 · Enter 操作 · Tab 换页 · Esc 返回"
 	case u.taskView:
 		return "↑↓ 选择 Enter 详情 Esc 返回"
 	case u.graph != nil:
-		return "↑↓ 节点 e 切边 Enter 打开 Esc 返回"
+		return "↑↓ 选择 · Enter 操作 · e 节点/边 · Esc 返回"
 	default:
 		return "Alt+←→ pane · Alt+1..9 直达 · Ctrl-a a 面板 · ? 帮助"
 	}

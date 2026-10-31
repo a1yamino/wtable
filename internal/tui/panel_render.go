@@ -440,7 +440,7 @@ func (u *ui) panelFrame(title string, lines []string) int {
 	for row := 2; row < h-1; row++ {
 		u.line(sideW, row, 1, "│", idleTitleStyle)
 	}
-	hint := " ←→ 侧栏/内容 · ↑↓ 选择 · Tab 换页 · Enter 打开 · Esc 返回"
+	hint := " ←→ 侧栏/内容 · ↑↓ 选择 · Tab 换页 · Enter 操作 · Esc 返回"
 	if p.form != "" {
 		hint = " ←→ 侧栏/内容 · ↑↓ 换字段 · Enter 下一步 / 末项提交 · Esc 取消"
 	}

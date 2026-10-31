@@ -117,6 +117,10 @@ func (u *ui) openPane(id string, zoom bool) {
 	if u.paneByID(id) == nil {
 		return
 	}
+	// Opening a pane always leaves full-screen views behind.
+	u.graph = nil
+	u.taskView = false
+	u.actions = nil
 	u.syncViews()
 	delete(u.parked, id)
 	t := u.tab()

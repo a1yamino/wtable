@@ -262,15 +262,9 @@ func (u *ui) graphKey(e *tcell.EventKey) {
 		v.follow = true
 		v.tasks = 0
 	}
-	if e.Key() == tcell.KeyEnter {
-		for i, p := range u.snapshot.Panes {
-			if p.ID == v.node {
-				u.graph = nil
-				u.openPane(u.snapshot.Panes[i].ID, true)
-				_, _ = u.refresh()
-				return
-			}
-		}
+	if e.Key() == tcell.KeyEnter || e.Str() == " " {
+		u.openActions()
+		return
 	}
 }
 

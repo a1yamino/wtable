@@ -140,11 +140,8 @@ func (u *ui) taskKey(e *tcell.EventKey) {
 		u.taskAction(e.Str())
 	} else {
 		u.moveTask(delta)
-		if e.Key() == tcell.KeyEnter {
-			tasks := u.orderedTasks()
-			if len(tasks) > 0 {
-				u.readTask(tasks[u.pickedTask(tasks)].ID)
-			}
+		if e.Key() == tcell.KeyEnter || e.Str() == " " {
+			u.openActions()
 		}
 	}
 }
@@ -160,7 +157,7 @@ func (u *ui) drawTasks() {
 	w, h := u.screen.Size()
 	width := max(1, min(90, max(1, w-4))-2)
 	capacity := max(1, h-6)
-	lines := []string{"任务 · ↑↓ 选择 · Enter 详情 · c 取消 · Tab 报告 · Esc 返回"}
+	lines := []string{"任务 · ↑↓ 选择 · Enter 操作 · Tab 报告 · Esc 返回"}
 	u.taskRows = map[int]string{}
 	if t := u.taskDetail; t != nil {
 		body := []string{fmt.Sprintf("%s  %s → %s  [%s]", t.ID, u.paneName(t.From), u.paneName(t.To), t.State), "创建：" + t.CreatedAt.Format("01-02 15:04:05") + "  更新：" + t.UpdatedAt.Format("01-02 15:04:05"), "", "投递：" + t.DeliveryMode + " / " + t.DeliveryStatus, "投递说明：" + t.DeliveryError,

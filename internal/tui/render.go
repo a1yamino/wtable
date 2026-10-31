@@ -219,6 +219,9 @@ func (u *ui) draw() {
 		u.modal([]string{
 			"快捷键 · 方向键优先（Alt 组合不传给 pane，普通按键照常进终端）",
 			"",
+			"动作    选中任意条目 → Enter 打开动作列表 → ↑↓ 选择 → Enter 执行",
+			"        列表里的每一项都有说明，不需要记字母键；Esc 返回",
+			"",
 			"移动    Alt+←/→/↑/↓（或 Alt+hjkl）切到该方向的 pane",
 			"        Alt+1..9 直达第 N 个 pane（标题左边就是编号）",
 			"        Alt+z 单看 / 还原；Ctrl-a f 从列表里挑",
@@ -258,6 +261,9 @@ func (u *ui) draw() {
 	}
 	if u.mode != "" {
 		u.drawInput()
+	}
+	if u.actions != nil {
+		u.drawActions()
 	}
 	if u.pendingPaste != "" {
 		u.modal([]string{"多行粘贴确认", "目标程序未启用 bracketed paste，粘贴可能执行多条命令。", "按 y 发送；n / Esc 取消（Enter 不会发送）", fmt.Sprintf("共 %d 字节", len(u.pendingPaste))})
