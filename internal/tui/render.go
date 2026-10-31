@@ -83,7 +83,7 @@ func (u *ui) draw() {
 	if s := u.selection; s != nil {
 		selectionKey = fmt.Sprintf("%p:%d:%d:%t", s, s.anchor, s.end, s.moved)
 	}
-	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll, u.reportView, u.reportCursor, u.reportDetail, u.taskScreen, u.taskDelivery, u.taskQueue, u.panelDrawKey(), u.acpDrawKey(), u.graph, u.viewStatus(), u.picker, u.boxes)
+	key := fmt.Sprint(w, h, u.focus, u.layout, u.zoom, u.tasks, u.prefix, u.help, u.copyMode, u.offsets, u.mode, u.editor.Display(), u.status, u.pendingPaste, u.colCuts, u.rowCuts, selectionKey, u.taskView, u.taskCursor, u.taskDetail, u.taskScroll, u.reportView, u.reportCursor, u.reportDetail, u.taskScreen, u.taskDelivery, u.taskQueue, u.panelDrawKey(), u.overlayDrawKey(), u.acpDrawKey(), u.viewStatus(), u.boxes)
 	if key == u.lastDrawKey && reflect.DeepEqual(u.snapshot, u.lastDrawSnapshot) {
 		return
 	}

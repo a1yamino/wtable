@@ -82,5 +82,22 @@ func (u *ui) panelDrawKey() string {
 	if p == nil {
 		return ""
 	}
-	return fmt.Sprint(p.tab, p.selected, p.field, p.scroll, p.form, p.targetID, p.confirmKind, p.confirmID, p.preview, p.busy, p.related, p.catalog, p.fields, p.roleView, p.layerReturn)
+	return fmt.Sprint(p.tab, p.selected, p.field, p.scroll, p.form, p.targetID, p.confirmKind, p.confirmID, p.preview, p.busy, p.related, p.catalog, p.fields, p.roleView, p.layerReturn, p.presetCursor, p.focusSide, u.activeLayer)
+}
+
+// overlayDrawKey covers the modal views that are drawn on top of the panes.
+// Their cursors and viewports are plain struct fields, so the draw cache must
+// observe the values, not just the pointer identity of the overlay.
+func (u *ui) overlayDrawKey() string {
+	var b strings.Builder
+	if a := u.actions; a != nil {
+		fmt.Fprintf(&b, "actions:%s:%d:%d;", a.title, a.cursor, len(a.items))
+	}
+	if g := u.graph; g != nil {
+		fmt.Fprintf(&b, "graph:%+v;", *g)
+	}
+	if p := u.picker; p != nil {
+		fmt.Fprintf(&b, "picker:%+v;", *p)
+	}
+	return b.String()
 }
