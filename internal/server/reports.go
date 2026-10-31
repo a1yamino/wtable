@@ -69,21 +69,19 @@ func (s *Server) completeReportLocked(t *model.Task) {
 		if len(s.state.Tasks) >= 2000 {
 			r.State = "undeliverable"
 			r.Error = "任务记录已达上限"
+		} else if mode, modeErr := resolveDelivery(recipient, ""); modeErr != nil {
+			// The follow-up is execution, not notification: its target must
+			// accept tasks. Never bypass a pane's declared capabilities.
+			r.State = "undeliverable"
+			r.Error = "handoff 目标不接受后续任务：" + modeErr.Error()
 		} else {
-			mode := "claim"
-			if t.From == "controller" {
-				mode = "inject"
-			}
-			if recipient.Backend == "acp" {
-				mode = "prompt"
-			}
 			now := time.Now()
 			next := model.Task{ID: newID("t-"), From: t.From, Origin: t.Origin, To: recipient.ID, Prompt: fmt.Sprintf("Task %s (%s) finished with state %s.\n%s", t.ID, t.To, t.State, reportSummary(t.Result)), State: "queued", DeliveryMode: mode, ParentTask: t.ID, OnComplete: "none", CreatedAt: now, UpdatedAt: now}
 			r.HandoffTask = next.ID
 			s.state.Tasks = append(s.state.Tasks, next)
-			if mode == "prompt" {
-				s.wake(next.To)
-			}
+			// Safe while holding s.mu since the pump has its own lock; push and
+			// prompt both make progress immediately instead of waiting a tick.
+			s.wake(next.To)
 		}
 	}
 	if index < 0 {

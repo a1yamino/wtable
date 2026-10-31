@@ -121,6 +121,69 @@ func TestLegacyFinalReportDoesNotRepeatHandoff(t *testing.T) {
 	}
 }
 
+// A handoff chooses its channel from the target's capabilities, exactly like
+// an ordinary send. Agent-origin handoffs used to fall back to pull, requiring
+// the recipient to poll, and disabled targets still received a task.
+func TestHandoffUsesTargetCapabilities(t *testing.T) {
+	s := taskTestServer(t)
+	closed := model.PaneCaps{ReceiveTasks: false}
+	s.state.Panes = []model.Pane{
+		{ID: "worker", Backend: "pty", State: "running"},
+		{ID: "inbox", Backend: "pty", State: "running"},
+		{ID: "closed", Backend: "pty", State: "running", Caps: &closed},
+	}
+	s.state.Edges = []model.Edge{{From: "sender", To: "inbox"}, {From: "sender", To: "closed"}}
+	s.state.Tasks = []model.Task{
+		{ID: "open", From: "sender", Origin: "sender", To: "worker", Prompt: "work", State: "delivered", DeliveryMode: "inject", OnComplete: "handoff", ReportTo: "inbox"},
+		{ID: "shut", From: "sender", Origin: "sender", To: "worker", Prompt: "work", State: "delivered", DeliveryMode: "inject", OnComplete: "handoff", ReportTo: "closed"},
+	}
+	if _, err := s.taskResult("worker", rawTask(map[string]string{"id": "open", "result": "done"})); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	children := []model.Task{}
+	for _, task := range s.state.Tasks {
+		if task.ParentTask == "open" {
+			children = append(children, task)
+		}
+	}
+	openReports := append([]model.Report(nil), s.state.Reports...)
+	s.mu.Unlock()
+	if len(children) != 1 || children[0].DeliveryMode != "push" || children[0].To != "inbox" || children[0].From != "sender" {
+		t.Fatalf("agent handoff did not use push for a default PTY target: %+v", children)
+	}
+	for _, report := range openReports {
+		if report.ParentTask == "open" && (report.State != "delivered" || report.HandoffTask != children[0].ID) {
+			t.Fatalf("deliverable handoff report is wrong: %+v", report)
+		}
+	}
+
+	if _, err := s.taskResult("worker", rawTask(map[string]string{"id": "shut", "result": "done"})); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	tasks := append([]model.Task(nil), s.state.Tasks...)
+	reports := append([]model.Report(nil), s.state.Reports...)
+	s.mu.Unlock()
+	for _, task := range tasks {
+		if task.ParentTask == "shut" {
+			t.Fatalf("disabled target received a handoff task: %+v", task)
+		}
+	}
+	found := false
+	for _, report := range reports {
+		if report.ParentTask == "shut" {
+			found = true
+			if report.State != "undeliverable" || report.HandoffTask != "" || !strings.Contains(report.Error, "handoff") {
+				t.Fatalf("disabled handoff must be undeliverable: %+v", report)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing report for the disabled handoff")
+	}
+}
+
 // A handoff whose report target is an ACP pane wakes that pane's pump while
 // the state lock is still held by task completion. This used to deadlock the
 // whole daemon, before the pump got its own lock.

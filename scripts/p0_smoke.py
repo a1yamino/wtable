@@ -181,9 +181,9 @@ def run(args):
         peer_ok("receiver", "task.next", {"timeout_ms": 0})
         peer_ok("receiver", "task.result", {"id": handoff["id"], "result": "follow-up input"})
         children = [t for t in rpc.call("task.list") if t.get("parent_task") == handoff["id"]]
-        assert len(children) == 1 and children[0]["state"] == "queued" and children[0]["from"] == sender["id"]
-        assert children[0]["to"] == observer["id"]
-        record("handoff_new_queued_child_preserves_sender")
+        assert len(children) == 1 and children[0]["state"] in ("queued", "delivered") and children[0]["from"] == sender["id"]
+        assert children[0]["to"] == observer["id"] and children[0]["delivery_mode"] == "push"
+        record("handoff_child_uses_push_and_preserves_sender")
 
         revoked = peer_ok("sender", "task.send", {"to": receiver["id"], "prompt": "revoke", "delivery_mode": "pull", "on_complete": "handoff", "report_to": observer["id"]})
         peer_ok("receiver", "task.next", {"timeout_ms": 0})
