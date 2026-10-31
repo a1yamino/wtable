@@ -16,7 +16,7 @@ import (
 // state directory can accumulate. The per-task limits alone still allow
 // 2,000 * 1 MiB of retained content, and every mutation marshals the whole
 // state; this cap keeps a single agent from making the daemon unresponsive.
-const maxTaskContentBytes = 64 << 20
+var maxTaskContentBytes = 64 << 20
 
 func (s *Server) edge(method string, raw json.RawMessage) (any, error) {
 	var a model.Edge
@@ -67,6 +67,24 @@ func (s *Server) peers(principal string) []model.Pane {
 		if principal == "controller" || s.hasEdgeLocked(principal, p.ID) {
 			p.Messages = nil
 			p.Command = nil
+			if principal != "controller" {
+				// A peer needs addressing metadata, not another pane's terminal
+				// diagnostics, role text or brief paths. Command/Messages were
+				// already stripped; clear the remaining screen-bearing fields.
+				p.Error = ""
+				p.ExitSummary = ""
+				p.LogPath = ""
+				p.BriefPath = ""
+				p.BriefTask = ""
+				p.RoleInstructions = ""
+				p.RoleHash = ""
+				p.SessionID = ""
+				p.LastOutput = ""
+				p.Readiness = ""
+				p.ReadinessReason = ""
+				p.Frame = nil
+				p.DeliveryConfig = model.DeliveryConfig{}
+			}
 			panes = append(panes, p)
 		}
 	}
@@ -366,6 +384,17 @@ func (s *Server) taskContentBytesLocked() int {
 	return total
 }
 
+// setTaskResultLocked stores a result only when the aggregate budget allows
+// it. PTY results arrive through finishTask and ACP results through runQueue;
+// sharing this check keeps both paths under the same limit.
+func (s *Server) setTaskResultLocked(t *model.Task, result string) error {
+	if delta := len(result) - len(t.Result); delta > 0 && s.taskContentBytesLocked()+delta > maxTaskContentBytes {
+		return errors.New("任务内容总量已达到 64 MiB 上限；请缩短结果或使用新的 WTABLE_HOME")
+	}
+	t.Result = result
+	return nil
+}
+
 func (s *Server) taskResult(principal string, raw json.RawMessage) (any, error) {
 	return s.finishTask(principal, raw, false)
 }
@@ -401,15 +430,14 @@ func (s *Server) finishTask(principal string, raw json.RawMessage, manual bool) 
 		s.mu.Unlock()
 		return nil, fmt.Errorf("任务状态为 %s，不能提交结果", t.State)
 	}
-	if delta := len(a.Result) - len(t.Result); delta > 0 && s.taskContentBytesLocked()+delta > maxTaskContentBytes {
+	if err := s.setTaskResultLocked(t, a.Result); err != nil {
 		s.mu.Unlock()
-		return nil, errors.New("任务内容总量已达到 64 MiB 上限；请缩短结果或使用新的 WTABLE_HOME")
+		return nil, err
 	}
 	t.State = "completed"
 	if a.Failed {
 		t.State = "failed"
 	}
-	t.Result = a.Result
 	t.UpdatedAt = time.Now()
 	t.Seen = false
 	if t.AcceptedAt == nil && !manual {
@@ -523,20 +551,24 @@ func (s *Server) runQueue(paneID string) {
 		p = s.paneLocked(paneID)
 		if t != nil && (activeState(t.State) || t.State == "unknown") {
 			t.State = "completed"
-			t.Result = result
+			stored := result
 			if err != nil {
 				t.State = "failed"
-				t.Result = err.Error()
+				stored = err.Error()
 				if agent.IsUncertain(err) {
 					t.State = "unknown"
 				} else if errors.Is(err, context.Canceled) {
 					t.State = "cancelled"
 				}
 			}
-			if len(t.Result) > 1<<20 {
-				t.Result = short(t.Result, 250000)
+			if len(stored) > 1<<20 {
+				stored = short(stored, 250000)
 				t.State = "failed"
-				t.Result = "结果超过 1 MiB，已截断：\n" + t.Result
+				stored = "结果超过 1 MiB，已截断：\n" + stored
+			}
+			if capErr := s.setTaskResultLocked(t, stored); capErr != nil {
+				t.State = "failed"
+				t.Result = capErr.Error()
 			}
 			t.UpdatedAt = time.Now()
 			t.Seen = false

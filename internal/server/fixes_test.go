@@ -174,6 +174,50 @@ func TestPeerBlockedReasonIsSanitizedEndToEnd(t *testing.T) {
 	}
 }
 
+func TestTaskContentCapAcrossPaths(t *testing.T) {
+	oldLimit := maxTaskContentBytes
+	maxTaskContentBytes = 32
+	t.Cleanup(func() { maxTaskContentBytes = oldLimit })
+
+	s := taskTestServer(t)
+	caps := model.PaneCaps{ReceiveTasks: true, ReturnResults: true, PushIdle: true, Pull: true}
+	s.state.Panes = []model.Pane{{ID: "worker", Backend: "pty", State: "running", Caps: &caps}}
+	s.state.Tasks = []model.Task{{ID: "old", From: "controller", To: "worker", Prompt: strings.Repeat("a", 24), State: "delivered"}}
+
+	if _, err := s.sendTask("controller", rawTask(model.SendParams{To: "worker", Prompt: "123456789"})); err == nil || !strings.Contains(err.Error(), "上限") {
+		t.Fatalf("create bypassed the aggregate cap: %v", err)
+	}
+	if _, err := s.finishTask("controller", rawTask(map[string]any{"id": "old", "result": "123456789"}), true); err == nil || !strings.Contains(err.Error(), "上限") {
+		t.Fatalf("result submit bypassed the aggregate cap: %v", err)
+	}
+	if s.state.Tasks[0].Result != "" {
+		t.Fatalf("rejected result was stored: %q", s.state.Tasks[0].Result)
+	}
+}
+
+func TestPeerListHidesPaneDiagnostics(t *testing.T) {
+	s := taskTestServer(t)
+	s.state.Panes = []model.Pane{
+		{ID: "peer", Name: "Peer"},
+		{ID: "target", Name: "Target", Error: "secret error", ExitSummary: "secret screen", LogPath: "/tmp/log",
+			BriefPath: "/tmp/brief", BriefTask: "brief", RoleInstructions: "secret role", RoleHash: "hash",
+			SessionID: "session", LastOutput: "secret output", Readiness: "blocked", ReadinessReason: "secret",
+			DeliveryConfig: model.DeliveryConfig{BlockedRegex: "secret"}},
+	}
+	s.state.Edges = []model.Edge{{From: "peer", To: "target"}}
+
+	got := s.peers("peer")
+	if len(got) != 1 || got[0].ID != "target" || got[0].Name != "Target" {
+		t.Fatalf("peer lost the target identity: %+v", got)
+	}
+	target := got[0]
+	if target.Error != "" || target.ExitSummary != "" || target.LogPath != "" || target.BriefPath != "" ||
+		target.BriefTask != "" || target.RoleInstructions != "" || target.RoleHash != "" || target.SessionID != "" ||
+		target.LastOutput != "" || target.Readiness != "" || target.ReadinessReason != "" || target.DeliveryConfig.BlockedRegex != "" {
+		t.Fatalf("peer received target diagnostics: %+v", target)
+	}
+}
+
 func TestReportDoesNotLeakBlockedLine(t *testing.T) {
 	s := taskTestServer(t)
 	s.state.Panes = []model.Pane{{ID: "target", Backend: "pty", State: "running"}, {ID: "inbox", State: "running"}}

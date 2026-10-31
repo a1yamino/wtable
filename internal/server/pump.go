@@ -100,12 +100,13 @@ func (s *Server) pumpStep(paneID string) {
 			break
 		}
 	}
+	busy := s.paneBusyLocked(paneID)
 	for _, t := range order {
 		m := taskMode(*t)
 		// A steer that was queued for a turn which has already ended (or a
 		// capability that was revoked) must not wait forever. Turn it into
 		// ordinary work so it cannot be injected into a later unrelated turn.
-		if m == "steer" && (!caps.PushSteer || !s.paneBusyLocked(paneID)) {
+		if m == "steer" && (!caps.PushSteer || !busy) {
 			t.DeliveryMode = "push"
 			if t.QueueReason != "steer_expired: 目标已空闲或不再支持 steer，已改为普通投递" {
 				t.QueueReason = "steer_expired: 目标已空闲或不再支持 steer，已改为普通投递"
