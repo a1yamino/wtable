@@ -105,11 +105,15 @@ func (u *ui) openPaneActions(p *model.Pane) {
 			u.openPane(pane.ID, true)
 		}},
 		{label: "编辑", hint: "名字 / 角色 / 账号", run: func() {
-			u.panel.tab = 0
+			u.ensurePanel(0)
 			for i, other := range u.snapshot.Panes {
 				if other.ID == pane.ID {
 					u.panel.selected = i
 				}
+			}
+			if len(u.panel.catalog.Presets) == 0 {
+				// The catalog is still loading; rebuild the form once it lands.
+				u.panel.afterLoad = "edit"
 			}
 			u.startAgentForm(true)
 		}},

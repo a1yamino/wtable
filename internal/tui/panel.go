@@ -98,6 +98,17 @@ func (u *ui) openPanel(tab int) {
 	_, _ = u.refresh()
 	u.panelAsync("preset.list", nil)
 }
+
+// ensurePanel makes the control panel usable: it dismisses the graph, which
+// otherwise swallows key and mouse events, and opens the panel when none
+// exists. Actions started from graph nodes target panel UI and must never
+// dereference a nil panel.
+func (u *ui) ensurePanel(tab int) {
+	u.graph = nil
+	if u.panel == nil {
+		u.openPanel(tab)
+	}
+}
 func (u *ui) panelAsync(method string, args any) {
 	p := u.panel
 	if p == nil || p.busy {
@@ -157,6 +168,8 @@ func (u *ui) panelFinished(r panelResult) {
 				u.startEdgeForm()
 			case "send":
 				u.startSendForm()
+			case "edit":
+				u.startAgentForm(true)
 			}
 			r.owner.afterLoad = ""
 		}
@@ -252,6 +265,7 @@ func (u *ui) layerOptions() []panelOption {
 	return out
 }
 func (u *ui) startAgentForm(edit bool) {
+	u.ensurePanel(0)
 	p := u.panel
 	p.roleChanged = false
 	p.field = 0
@@ -307,6 +321,7 @@ func (u *ui) startAgentForm(edit bool) {
 	}
 }
 func (u *ui) startEdgeForm() {
+	u.ensurePanel(1)
 	p := u.panel
 	opts := u.paneOptions(true)
 	if len(opts) < 2 {
@@ -322,6 +337,7 @@ func (u *ui) startEdgeForm() {
 	p.fields = []panelField{optionField("from", "来源", from, opts), multiField("targets", "目标（Space 多选）", opts)}
 }
 func (u *ui) startSendForm() {
+	u.ensurePanel(2)
 	p := u.panel
 	opts := u.paneOptions(false)
 	if len(opts) == 0 {

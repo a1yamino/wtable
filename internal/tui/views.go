@@ -415,6 +415,7 @@ func (u *ui) markVisibleSeen() {
 	}
 }
 func (u *ui) peekPane(p model.Pane) {
+	u.ensurePanel(0)
 	var result struct {
 		Lines []string `json:"lines"`
 	}
