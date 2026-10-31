@@ -76,7 +76,7 @@ func (s *Server) paneMetadataLocked(p model.Pane) model.Pane {
 		}
 	}
 	for _, task := range s.state.Tasks {
-		if task.To != p.ID || taskMode(task) != "inject" {
+		if task.To != p.ID || (taskMode(task) != "push" && taskMode(task) != "steer") {
 			continue
 		}
 		if task.State == "delivered" && task.DeliveryStatus == "write-unconfirmed" {

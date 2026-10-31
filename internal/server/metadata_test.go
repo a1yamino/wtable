@@ -7,7 +7,42 @@ import (
 	"time"
 
 	"wtable/internal/model"
+	"wtable/internal/terminal"
 )
+
+// An in-flight push task is the pane's delivery gate signal. If the metadata
+// loop filters on a stale mode name, every pane looks ready while a task is
+// still unacknowledged, and the UI never surfaces write-unconfirmed.
+func TestPaneReadinessReflectsInflightPushTasks(t *testing.T) {
+	s := taskTestServer(t)
+	term, err := terminal.Start(s.ctx, terminal.Config{Command: []string{"/bin/cat"}, Cols: 120, Rows: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.terminals["pty"] = term
+	s.state.Panes = []model.Pane{{ID: "pty", Backend: "pty", State: "running", DeliveryConfig: model.DeliveryConfig{SettleMS: 1}}}
+	s.state.Tasks = []model.Task{{ID: "t-1", To: "pty", DeliveryMode: "inject", State: "delivered", DeliveryStatus: "verifying"}}
+	// Let the settle window lapse so only the task can hold the gate.
+	time.Sleep(20 * time.Millisecond)
+
+	if got := s.paneMetadataLocked(s.state.Panes[0]).Readiness; got != "busy" {
+		t.Fatalf("delivered task must make the pane busy, got %q", got)
+	}
+	s.state.Tasks[0].DeliveryStatus = "write-unconfirmed"
+	if got := s.paneMetadataLocked(s.state.Panes[0]).Readiness; got != "unconfirmed" {
+		t.Fatalf("write-unconfirmed must surface as unconfirmed, got %q", got)
+	}
+	s.state.Tasks[0].DeliveryMode = "push"
+	s.state.Tasks[0].DeliveryStatus = "submitted"
+	s.state.Tasks[0].State = "accepted"
+	if got := s.paneMetadataLocked(s.state.Panes[0]).Readiness; got != "busy" {
+		t.Fatalf("accepted task must keep the pane busy, got %q", got)
+	}
+	s.state.Tasks[0].State = "completed"
+	if got := s.paneMetadataLocked(s.state.Panes[0]).Readiness; got == "busy" || got == "unconfirmed" {
+		t.Fatalf("finished task must release the gate, got %q", got)
+	}
+}
 
 func TestStateFrameSelectionAndPeek(t *testing.T) {
 	s := onboardingServer(t)
