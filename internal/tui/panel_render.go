@@ -52,7 +52,8 @@ func (u *ui) drawPanel() {
 		lines := append([]string{}, question...)
 		lines = append(lines, "", "  [ 确认 ]        [ 取消 ]", "", "y 确认 · n/Esc 取消 · Enter 不确认（安全考虑）；也可以直接点上面的按钮")
 		top := u.panelFrame("确认", lines)
-		buttons := top + len(question) + 2
+		// lines: question..., blank, "[ 确认 ] [ 取消 ]", blank, hint.
+		buttons := top + len(question) + 1
 		p.rows[buttons] = -1 // [ 确认 ]
 		p.confirmCancelRow = buttons
 		return

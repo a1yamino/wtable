@@ -57,7 +57,7 @@ func (u *ui) openActions() {
 			}
 		case 3:
 			if u.panel.selected == 0 {
-				u.openLayerActions(model.Layer{Name: "工作区", Path: u.cwd})
+				u.openWorkspaceActions()
 			} else if l := u.panelLayer(); l != nil {
 				u.openLayerActions(*l)
 			}
@@ -201,6 +201,10 @@ func (u *ui) openTaskActions(id string) {
 	if !ok {
 		return
 	}
+	cancelLabel, cancelHint := "取消", "先请求停止；PTY 工作需再次确认"
+	if task.State == "cancelling" {
+		cancelLabel, cancelHint = "确认已停止", "输入 y 后确认；不会自动判断"
+	}
 	items := []actionItem{
 		{label: "查看详情", hint: task.State + " · " + shortTask(task.ID), run: func() {
 			u.openTasks()
@@ -224,19 +228,40 @@ func (u *ui) openTaskActions(id string) {
 			}
 		}},
 		{label: "复制任务 ID", run: func() { u.copyText(task.ID, "已复制 "+task.ID) }},
-		{label: "取消", hint: "先请求停止，再确认", danger: true, run: func() {
+		{label: cancelLabel, hint: cancelHint, danger: true, run: func() {
+			if task.State == "cancelling" {
+				// The stop confirmation is a typed y/n decision, never Enter.
+				u.taskActionID = task.ID
+				u.openInput("task-confirm-stop", "")
+				return
+			}
 			var out model.Task
 			if !u.call("task.cancel", map[string]string{"id": task.ID}, &out) {
 				return
 			}
 			if out.State == "cancelling" {
-				u.status = "已请求取消；在任务列表里再选一次「取消」并确认"
+				u.status = "已请求停止；再次打开该任务可选择「确认已停止」"
 				return
 			}
 			u.status = "任务已取消"
 		}},
 	}
 	u.showActions("任务 "+shortTask(task.ID)+" 能做什么？", "task:"+task.ID, items)
+}
+
+// The workspace row is not a layer: setting activeLayer to its path would
+// make the next spawn fail with "layer 不存在". It clears the layer instead.
+func (u *ui) openWorkspaceActions() {
+	items := []actionItem{
+		{label: "设为新 Agent 的默认目录", run: func() {
+			u.activeLayer = ""
+			u.activeCwd = u.cwd
+			u.status = "新 Agent 将创建在 " + u.cwd
+		}},
+		{label: "打开目录", hint: u.cwd, run: func() { u.status = "目录：" + u.cwd }},
+		{label: "复制路径", run: func() { u.copyText(u.cwd, "已复制路径") }},
+	}
+	u.showActions("工作区能做什么？", "workspace", items)
 }
 
 func (u *ui) openLayerActions(l model.Layer) {
@@ -392,7 +417,11 @@ func (u *ui) actionMouse(e *tcell.EventMouse, pressed bool) {
 	if y < first {
 		return
 	}
-	index := y - first
+	// Mirror drawActions: clicks must account for the scrolled window.
+	visible := height - 5
+	top := max(0, m.cursor-visible+1)
+	top = min(top, max(0, len(m.items)-visible))
+	index := y - first + top
 	if index >= 0 && index < len(m.items) {
 		u.runAction(index)
 	}
