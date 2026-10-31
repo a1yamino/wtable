@@ -15,7 +15,7 @@ go build -o bin/wtable ./cmd/wtable
 ./bin/wtable
 ```
 
-The first launch starts a local daemon and creates a shell pane. Press `Ctrl-a`, then `d`, to leave the interface while keeping the pane running. Run `./bin/wtable` again to reattach.
+The first launch starts a local daemon and opens the PTY foreground picker; one `Enter` creates the agent you talk to. Press `Ctrl-a`, then `q`, to leave the interface while keeping panes running. Run `./bin/wtable` again to reattach and restore the last focused pane.
 
 State is stored in `~/Library/Application Support/wtable` by default. Set `WTABLE_HOME` to use an independent state directory:
 
@@ -28,7 +28,7 @@ Use a short absolute path for `WTABLE_HOME` to stay within the macOS Unix socket
 
 ## Terminals and agents
 
-Create panes from another terminal. New sessions run in the background; use `Ctrl-a f` to open one:
+Create panes from another terminal. New sessions run in the background and appear in the rail; press `Ctrl-a a` and choose one to open it:
 
 ```sh
 ./bin/wtable new shell --dir "$PWD"
@@ -53,11 +53,11 @@ PTY and ACP are separate backends. Switching the same provider session between t
 
 ## Control panel and agent onboarding
 
-Press `Ctrl-a a` to open the panel. Tab / Shift-Tab switches pages, arrow keys or the wheel select rows, and Escape goes back. Enter or Space opens the selected row's action list; arrow keys choose an entry and Enter runs it, so page-specific letters do not have to be memorised.
+The left rail is always visible. `Ctrl-a a` focuses it; `Enter` opens the selected agent or inbox item, `Space` opens its action list, `n` creates, `p` moves a pane into the utility slot, `x` removes, and `/` filters. For the full Agents / Edges / Tasks / Layers administration panel, press `Ctrl-a Space` and choose 管理面板. Tab / Shift-Tab switches pages, arrow keys or the wheel select rows, and Escape goes back. Enter or Space opens the selected row's action list, so page-specific letters do not have to be memorised.
 
 | Page | Actions |
 |---|---|
-| Agents | `a` add, `e` edit name/role/account, `d` remove, Enter action list (first entry opens), `p` park/open, `v` peek, `B` preview brief, `b` resend brief, `O` roles, `l` diagnostics, `R` restart |
+| Agents | `a` add, `e` edit name/role/account, `d` remove, Enter action list (first entry opens), `p` put in / take out of the utility slot, `v` peek, `B` preview brief, `b` resend brief, `O` roles, `l` diagnostics, `R` restart |
 | Edges | `a` choose a source and multiple targets, `x` delete, `t` filter by the focused pane |
 | Tasks | `s` send to multiple targets, Enter action list (details/retry/cancel), `r` retry, `x` cancel, `b` reports |
 | Layers | `n` create a worktree, Enter use its directory for new panes |
@@ -77,7 +77,7 @@ Built-in presets are Shell, Codex PTY, Codex ACP, Claude PTY, and Agy PTY. Disco
 
 The panel enables briefs by default for non-Shell presets; the CLI requires `--brief`. Briefs are at most 2048 UTF-8 bytes, stored in `<WTABLE_HOME>/briefs/<pane>.md` with mode `0600`. Enabling one exposes `WTABLE_BRIEF` and queues it through the P0 delivery gate. Content includes identity, directory, role, authorized outgoing peers, and reporting instructions without credentials. PTY instructions require ack/result; ACP uses automatic protocol completion. Restart does not automatically replay a previous brief; resend explicitly when needed.
 
-ACP panes have a persistent composer at the bottom. Enter submits through the existing task queue in the same session, Alt-Enter inserts a newline, and paste inserts at the cursor. Permission prompts take priority; Enter never approves them.
+ACP panes have a persistent composer at the bottom. Enter does exactly what the line under it says: it sends when the pane is idle and queues (showing the position) when a turn is running. `Ctrl-J` inserts a newline, `Esc` clears the draft, and `Ctrl-a Enter` is the two-step "interrupt the current turn, then send". Queued chat turns are marked `chat` and stay out of the delegation task list. Permission requests never take the keyboard: the card appears above the composer, typing continues into the pane, `Ctrl-a p` focuses the card, numbers choose an option, `r` rejects, `d` postpones, and `Esc` only collapses the card (the request stays pending). Enter never approves.
 
 Running panes can change name and role. Account changes require an exited, failed, or interrupted pane; command, backend, and directory changes require recreation. Removal requires explicit `y` confirmation, stops the process, cancels related queued work, and removes incident edges while preserving task/report/brief history. Nonzero exit shows failed state, exit code, a redacted tail summary, and log path; exit code 0 remains exited.
 
@@ -97,11 +97,13 @@ Account profiles are read from `<WTABLE_HOME>/accounts.json`, without account sc
 
 Editing configuration does not change a running process's environment. Default layer selection lasts only for the current TUI session.
 
-## Views, roles, and account references
+## Rail, canvas, utility slot, and inbox
 
-The UI initially focuses one pane. `Ctrl-a f` opens the pane picker; `Ctrl-a |` and `Ctrl-a -` split the focused leaf with another pane. Drag dividers to adjust proportions, which survive window resizing. `Ctrl-a z` toggles focus within the current layout. Use `Ctrl-a T` to create a view tab, `{` / `}` to switch, `,` to rename, and `W` to close it. These commands use the `Ctrl-a` prefix. Closing a tab does not stop processes. Tabs, layout trees and parking are local to the current attachment; reattaching starts in focus mode.
+The workbench has one main canvas, one optional utility slot, and a permanent left rail. The rail has three stable groups: 需要你 (approvals, exits, blocked delivery, unread replies, finished human tasks), 前台 (at most one PTY foreground agent), and Workers. Selecting any agent replaces the main canvas; it never splits the layout. `Ctrl-a s` opens one utility slot on the right (default: a shell whose cwd follows the main pane) and closes it again; closing only removes it from the canvas, so the process keeps running in the rail and the next `Ctrl-a s` reuses it. There are no tabs, park, zoom, layout trees, or split panes.
 
-Agents `p` parks or opens a pane, `v` peeks at its last 20 text lines, and Enter opens it. Graph jumps also open parked panes. Background PTYs retain their last size; only visible panes receive frame requests and resizes. `Ctrl-a !` opens the next pane needing attention. Opening a pane marks its associated incoming task results and reports as seen. Lists show recent output, activity, readiness, endpoint type and denied-operation counts. Creation forms warn about shared directories/layers and accounts; `L` creates an isolated layer and returns to the form. Readiness describes the delivery gate, not task acknowledgement.
+A foreground agent is the one you talk to and is always a PTY; ACP exists only as a worker backend. The API rejects `foreground + acp` and a second foreground. First launch opens a one-Enter PTY preset picker (ACP is absent); if no PTY preset is installed, the picker offers "recheck" and "temporary shell" instead of a dead end. On reattach the server restores the last focused pane, falling back to a running pane; the utility slot is not restored.
+
+Each rail row shows exactly one primary signal: approval (`⏳`), exit (`✕`), unread (`◉`), queue (`⏸`), then running/idle. The canvas title uses fixed slots and only shows non-zero counts (`▌ coder · ◐ running · 12s · ⏸2 ⏳1 ◉3`). ACP replies count as unread only while another pane is focused, and opening a pane is what clears its unread items. Background PTYs retain their last size; only the main canvas and utility request frames and resizes. Lists show recent output, activity, readiness, endpoint type and denied-operation counts. Creation forms warn about shared directories/layers and accounts; `L` creates an isolated layer and returns to the form. Readiness describes the delivery gate, not task acknowledgement.
 
 `state.get` now distinguishes omitted/null `ids` (all frames), `[]` (metadata only), and a nonempty list (selected frames). `frames: false` always suppresses frames. `pane.peek` returns text without constructing a frame.
 
@@ -143,29 +145,27 @@ The controller can request `state.get` with `graph: true` for `graph.nodes` and 
 
 ## Keyboard controls
 
-Press `Ctrl-a` first, then the indicated key:
+The only leader key is `Ctrl-a` (no Alt combinations). Press it twice to send a literal `Ctrl-a` to the terminal.
 
 | Key | Action |
 |---|---|
-| `?` | Show help |
-| `n` | Create a shell pane |
-| `a` | Open the Agents / Edges / Tasks / Layers control panel |
-| `c` | Open custom-agent creation; argv executes without shell parsing |
-| `o` | Focus the next pane |
-| `s` | Cycle through grid, side-by-side, and stacked layouts |
-| `z` | Zoom the current pane or restore the layout |
-| `b` | Show or hide the task bar |
-| `[` | Enter scrollback mode; use arrow keys or `j/k` to scroll, `y` to copy visible text, and `q` to leave |
-| `t` | Open multi-target task creation with delivery, queuing, and reporting options |
-| `G` | Open the collaboration Graph; select nodes with `j/k`, Enter action list |
-| `g` / `r` | Open the add-edge picker / edge list without typing IDs |
-| `k` | Open Tasks: Enter action list (details/retry/cancel), `r` retry, `x` cancel, `b` reports |
-| `x` | Stop the current pane; enter `y` to confirm |
-| `R` | Restart the current exited, failed, or interrupted pane in place |
-| `d` / `q` | Detach, keeping background sessions running |
-| `Ctrl-a` | Send a literal `Ctrl-a` by pressing it twice |
+| `Ctrl-a j` / `Ctrl-a k`, or `Ctrl-a ↓/↑` | next / previous agent (rail order) |
+| `Ctrl-a 1..9` | jump to the N-th rail agent |
+| `Ctrl-a h` / `Ctrl-a l`, or `Ctrl-a ←/→` | focus the main canvas / utility slot |
+| `Ctrl-a a` | focus the rail (`Esc` returns; expands the drawer on narrow terminals) |
+| `Ctrl-a p` | focus the next pending approval |
+| `Ctrl-a s` | open / close the utility slot |
+| `Ctrl-a t` | task composer: queue, steer (only when declared and busy), or interrupt-then-send |
+| `Ctrl-a Space` | command palette |
+| `Ctrl-a ?` | context help (three lines, with the glyph legend) |
+| `Ctrl-a q` (or `d`) | detach; background sessions keep running |
+| `Ctrl-a Ctrl-a` | send a literal `Ctrl-a` |
 
-Left-click a pane title or its content to focus it. Drag a divider to resize its layout-tree split. Proportions last for the current TUI session and survive window resizing and zoom; choosing a new layout redistributes the current leaves. Mouse focus and resizing are disabled while a dialog is open.
+In the rail: `↑↓` select, `Enter` open, `Space` actions, `n` create, `e` edit, `p` utility slot, `x` remove (type `y`), `/` filter, `Esc` back. On an approval card: `1..9` choose, `r` reject, `d` postpone, `[` / `]` switch request, `Enter` details, `Esc` collapse. `R` rejects all requests in the pane after a `y` confirmation; `A` allows all only when every request shares the same tool and `allow_always` option (also two-step).
+
+The composer uses `Enter` to send/queue, `Ctrl-J` for a newline, `Esc` to clear, and `Ctrl-a Enter` to interrupt-then-send after a second confirmation. The command palette (`Ctrl-a Space`) carries the low-frequency actions: graph, task list, queue, management panel, utility direction, restart/stop, and detach. `Ctrl-a G` (graph) and `Ctrl-a b` (tasks) remain as compatibility aliases.
+
+Click a rail row to open that agent; click a pane, approval card, or composer to focus it. Drag the single divider between the main canvas and the utility slot to change the ratio. Mouse focus and resizing are disabled while a dialog is open.
 
 Drag within pane content to select text; releasing the left button copies it to the macOS clipboard. Selection supports multiple lines, reverse dragging, CJK text, and emoji. The selected view stays frozen until Escape or another click restores live output. Selection is limited to the current pane's visible content, without cross-pane selection or automatic scrolling.
 
@@ -173,7 +173,7 @@ The wheel scrolls history in the pane under the pointer and returns to live outp
 
 Input dialogs support Left/Right, Home/End (or Ctrl-A/E), Delete/Backspace, Ctrl-U to delete to the start of the line, and Ctrl-W to delete the previous word. Paste inserts at the cursor. Up/Down browse history for the current input type, stored only for this TUI session. Task input supports Alt-Enter for newlines. Failed submissions keep the draft for editing.
 
-`Ctrl-a t` opens multi-target task creation, initially selecting the focused pane. Tab moves between fields, arrows choose options, Space selects targets, and Enter submits. Partial failures retain only targets that have not succeeded, so retrying the form does not duplicate successful sends. `Ctrl-a k` opens Tasks; Enter opens the action list, whose first entry shows the full prompt/result. Details support scrolling and these actions:
+`Ctrl-a t` opens a one-line task composer for the current pane; `Tab` cycles the available modes (queue, steer when the target declares `PushSteer` and is busy, interrupt-then-send), and the mode bar spells out what Enter will do. The multi-target form remains under the management panel's Tasks page. `Ctrl-a b` opens Tasks; Enter opens the action list, whose first entry shows the full prompt/result. Details support scrolling and these actions:
 
 | Detail key | Action |
 |---|---|
@@ -325,7 +325,7 @@ External provider authentication, adapter compatibility, and session recovery mu
 - Scrollback retains up to 10,000 physical lines. Resizing does not reflow historical output. Full VT conformance has not been established.
 - The TUI polls full cell snapshots; cell deltas and event replay are not implemented. The original performance targets have not been validated.
 - Mouse selection and copying visible content are supported, alongside keyboard scrollback and copying the visible screen. Wheel forwarding to mouse-aware applications is supported; click/drag forwarding and the OSC 52 clipboard protocol are not supported.
-- Layout trees, tabs, parking, size proportions, focus, and zoom belong to the current TUI session. Reattaching starts in focus mode.
+- The main canvas selection is persisted as `last_focus` and restored on attach; the utility slot and its ratio are not persisted. The rail order is stable creation order.
 - Up to 32 panes and 2,000 task records are retained, with a 64 MiB aggregate prompt/result budget. Panes can be removed from Agents; task history has no cleanup command. The structured chat view is bounded, while complete task results are stored separately.
 - Notes, an embedded editor, account pools, scheduled tasks, images, and browser portals are planned for later versions.
 

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gdamore/tcell/v3"
+	"github.com/gdamore/tcell/v3/color"
 )
 
 type selectionCell struct {
@@ -24,7 +25,12 @@ type textSelection struct {
 // Capture the displayed cells so streaming output cannot move text under a drag.
 // This also gives PTY and ACP panes the same selection behavior.
 func (u *ui) startSelection(id string, r rect, x, y int) {
-	area := rect{r.x, r.y + 1, r.w, r.h - 1}
+	area := r
+	if p := u.paneByID(id); p != nil {
+		area = u.contentRect(*p, r)
+	} else {
+		area = rect{r.x, r.y + 1, r.w, r.h - 1}
+	}
 	if area.w < 1 || area.h < 1 || !area.contains(x, y) {
 		return
 	}
@@ -88,7 +94,7 @@ func (u *ui) drawSelection() {
 			}
 			style := c.style
 			if s.selected(x, y, c.width) {
-				style = style.Reverse(false).Foreground(tcell.ColorBlack).Background(tcell.NewHexColor(0xa6d8ea))
+				style = style.Reverse(false).Foreground(color.Black).Background(color.NewHexColor(0xa6d8ea))
 			}
 			u.screen.Put(s.area.x+x, s.area.y+y, c.text, style)
 		}

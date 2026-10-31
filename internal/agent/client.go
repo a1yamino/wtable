@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"wtable/internal/model"
 )
@@ -101,6 +102,143 @@ type Client struct {
 	active      *turn
 	exitErr     error
 	stderrBytes atomic.Int64
+	toolMu      sync.Mutex
+	toolCalls   map[string]toolCallSummary
+	toolOrder   []string
+}
+
+// toolCallSummary is the bounded cache behind permission previews. ACP sends
+// tool_call updates before the permission request; the request itself is often
+// just a title, so without this the human approves blind.
+type toolCallSummary struct {
+	Title       string
+	Kind        string
+	Locations   []string
+	RawInput    string
+	ContentText string
+	Status      string
+}
+
+type acpLocation struct {
+	Path string `json:"path"`
+	Line *int   `json:"line,omitempty"`
+}
+
+func (l acpLocation) String() string {
+	if l.Line != nil {
+		return fmt.Sprintf("%s:%d", l.Path, *l.Line)
+	}
+	return l.Path
+}
+
+func locationStrings(locs []acpLocation) []string {
+	out := make([]string, 0, len(locs))
+	for _, l := range locs {
+		if l.Path != "" {
+			out = append(out, previewText(l.String(), 300))
+		}
+	}
+	return out
+}
+
+// contentText flattens ACP tool-call content into plain lines.
+func contentText(raw json.RawMessage) string {
+	var content []struct {
+		Type    string `json:"type"`
+		Content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(raw, &content) != nil {
+		return ""
+	}
+	var lines []string
+	for _, v := range content {
+		if v.Type == "content" && v.Content.Type == "text" && strings.TrimSpace(v.Content.Text) != "" {
+			lines = append(lines, v.Content.Text)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// previewText makes untrusted agent output safe for a single-line UI field and
+// for JSON logs: control characters become spaces, runs of spaces collapse, and
+// the text is bounded. Line breaks are preserved because the approval card uses
+// them to separate title, kind, locations and input.
+func previewText(text string, limit int) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = strings.Map(func(r rune) rune {
+			switch {
+			case r == '\t':
+				return ' '
+			case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+				return ' '
+			}
+			return r
+		}, line)
+		lines[i] = strings.Join(strings.Fields(line), " ")
+	}
+	text = strings.TrimSpace(strings.Join(lines, "\n"))
+	if len(text) > limit {
+		text = text[:limit]
+		for !utf8.ValidString(text) && len(text) > 0 {
+			text = text[:len(text)-1]
+		}
+		text += "…"
+	}
+	return text
+}
+
+func (c *Client) rememberToolCall(id string, summary toolCallSummary) {
+	if id == "" {
+		return
+	}
+	c.toolMu.Lock()
+	defer c.toolMu.Unlock()
+	if c.toolCalls == nil {
+		c.toolCalls = map[string]toolCallSummary{}
+	}
+	if _, exists := c.toolCalls[id]; !exists {
+		c.toolOrder = append(c.toolOrder, id)
+	}
+	c.toolCalls[id] = summary
+	for len(c.toolOrder) > 64 {
+		delete(c.toolCalls, c.toolOrder[0])
+		c.toolOrder = c.toolOrder[1:]
+	}
+}
+
+func (c *Client) cachedToolCall(id string) toolCallSummary {
+	c.toolMu.Lock()
+	defer c.toolMu.Unlock()
+	return c.toolCalls[id]
+}
+
+// permissionPreview renders what the agent is about to do. rawInput is shown,
+// never executed.
+func permissionPreview(p model.Permission, summary toolCallSummary) string {
+	parts := []string{}
+	if summary.Title != "" {
+		parts = append(parts, summary.Title)
+	}
+	if summary.Kind != "" {
+		parts = append(parts, "kind: "+summary.Kind)
+	}
+	if len(summary.Locations) > 0 {
+		parts = append(parts, "locations: "+strings.Join(summary.Locations, ", "))
+	}
+	if summary.RawInput != "" {
+		parts = append(parts, "input: "+summary.RawInput)
+	}
+	if summary.ContentText != "" {
+		parts = append(parts, summary.ContentText)
+	}
+	if len(parts) == 0 {
+		parts = append(parts, p.Title)
+	}
+	return previewText(strings.Join(parts, "\n"), 800)
 }
 
 func Start(ctx context.Context, cfg Config) (*Client, error) {
@@ -540,8 +678,11 @@ func (c *Client) handleNotification(msg message) {
 			Type       string          `json:"sessionUpdate"`
 			Content    json.RawMessage `json:"content"`
 			Title      string          `json:"title"`
+			Kind       string          `json:"kind"`
 			Status     string          `json:"status"`
 			ToolCallID string          `json:"toolCallId"`
+			Locations  []acpLocation   `json:"locations"`
+			RawInput   json.RawMessage `json:"rawInput"`
 		} `json:"update"`
 	}
 	if json.Unmarshal(msg.Params, &p) != nil {
@@ -582,20 +723,35 @@ func (c *Client) handleNotification(msg message) {
 		if p.Update.Status != "" {
 			text += " [" + p.Update.Status + "]"
 		}
-		var content []struct {
-			Type    string `json:"type"`
-			Content struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
+		body := contentText(p.Update.Content)
+		if body != "" {
+			text += "\n" + body
 		}
-		if json.Unmarshal(p.Update.Content, &content) == nil {
-			for _, v := range content {
-				if v.Type == "content" && v.Content.Type == "text" {
-					text += "\n" + v.Content.Text
-				}
-			}
+		// Merge with the cached summary: an update often carries only a status,
+		// while the permission preview needs the earlier title/locations/input.
+		summary := c.cachedToolCall(p.Update.ToolCallID)
+		if p.Update.Title != "" {
+			summary.Title = p.Update.Title
 		}
+		if p.Update.Kind != "" {
+			summary.Kind = p.Update.Kind
+		}
+		if len(p.Update.Locations) > 0 {
+			summary.Locations = locationStrings(p.Update.Locations)
+		}
+		if len(p.Update.RawInput) > 0 && string(p.Update.RawInput) != "null" {
+			summary.RawInput = previewText(string(p.Update.RawInput), 400)
+		}
+		if body != "" {
+			summary.ContentText = previewText(body, 400)
+		}
+		if p.Update.Status != "" {
+			summary.Status = p.Update.Status
+		}
+		if summary.Title == "" {
+			summary.Title = p.Update.Title
+		}
+		c.rememberToolCall(p.Update.ToolCallID, summary)
 	default:
 		return
 	}
@@ -627,8 +783,11 @@ func (c *Client) handleRequest(msg message) {
 	var p struct {
 		SessionID string `json:"sessionId"`
 		ToolCall  struct {
-			Title      string `json:"title"`
-			ToolCallID string `json:"toolCallId"`
+			Title      string          `json:"title"`
+			ToolCallID string          `json:"toolCallId"`
+			Kind       string          `json:"kind"`
+			Locations  []acpLocation   `json:"locations"`
+			RawInput   json.RawMessage `json:"rawInput"`
 		} `json:"toolCall"`
 		Options []struct {
 			ID   string `json:"optionId"`
@@ -650,10 +809,26 @@ func (c *Client) handleRequest(msg message) {
 	c.permissions[string(msg.ID)] = cancel
 	sessionID := c.sessionID
 	c.mu.Unlock()
-	permission := model.Permission{ID: "acp:" + string(msg.ID), Title: p.ToolCall.Title}
+	permission := model.Permission{ID: "acp:" + string(msg.ID), Title: previewText(p.ToolCall.Title, 200)}
 	if permission.Title == "" {
-		permission.Title = p.ToolCall.ToolCallID
+		permission.Title = previewText(p.ToolCall.ToolCallID, 200)
 	}
+	summary := c.cachedToolCall(p.ToolCall.ToolCallID)
+	if p.ToolCall.Title != "" {
+		summary.Title = p.ToolCall.Title
+	}
+	if p.ToolCall.Kind != "" {
+		summary.Kind = p.ToolCall.Kind
+	}
+	if len(p.ToolCall.Locations) > 0 {
+		summary.Locations = locationStrings(p.ToolCall.Locations)
+	}
+	if len(p.ToolCall.RawInput) > 0 && string(p.ToolCall.RawInput) != "null" {
+		summary.RawInput = previewText(string(p.ToolCall.RawInput), 400)
+	}
+	permission.Kind = previewText(summary.Kind, 40)
+	permission.Locations = append([]string(nil), summary.Locations...)
+	permission.Preview = permissionPreview(permission, summary)
 	for _, o := range p.Options {
 		permission.Options = append(permission.Options, model.PermissionOption{ID: o.ID, Name: o.Name, Kind: o.Kind})
 	}

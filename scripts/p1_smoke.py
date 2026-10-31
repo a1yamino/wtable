@@ -100,10 +100,21 @@ def run(args):
             t = title.strip("[]")
             return wait_until(lambda: shown("侧栏/内容") and (not t or shown(t + " ")) and not shown("处理中"), "panel ready " + t)
 
-        def ensure_panel():
-            if not shown("侧栏/内容"):
-                key("a")
+        def open_panel():
+            if shown("侧栏/内容"):
+                return
+            send(b"\x01 ")
+            wait_until(lambda: shown("命令面板"), "command palette")
+            send("管理面板")
+            send(b"\r")
+            try:
                 wait_until(lambda: shown("侧栏/内容"), "panel open")
+            except AssertionError:
+                print("SCREEN AT PANEL FAILURE:\n" + screen(), flush=True)
+                raise
+
+        def ensure_panel():
+            open_panel()
         def finish_brief(name):
             p = wait_until(lambda: (p if (p := pane(name)) and p.get("brief_task") else None), "brief created")
             wait_until(lambda: task(p["brief_task"])["state"] == "delivered", "brief injected")
@@ -113,7 +124,7 @@ def run(args):
             return p
 
         wait_until(lambda: shown("seed"), "initial TUI")
-        key("a"); ready_panel()
+        open_panel(); ready_panel()
         presets = rpc.call("preset.list")["presets"]
         echo_index = next(i for i, p in enumerate(presets) if p["id"] == "echo-fixture")
         for name in ["alpha", "beta", "gamma"]:
@@ -190,21 +201,29 @@ def run(args):
             path = root / (p["id"] + ".input")
             return path.exists() and marker in path.read_text()
         wait_until(lambda: received(beta, "FOCUS_BEFORE"), "focus beta input")
-        key("a"); ready_panel(); send("d"); wait_until(lambda: shown("y 确认"), "remove confirmation")
+        open_panel(); ready_panel(); send("d"); wait_until(lambda: shown("y 确认"), "remove confirmation")
         send(b"\r"); time.sleep(.1); assert pane("seed") is not None
         send("y"); wait_until(lambda: pane("seed") is None, "seed removal"); ready_panel(); esc()
-        send("FOCUS_AFTER\r"); wait_until(lambda: received(beta, "FOCUS_AFTER"), "focus preserved input")
+        send("FOCUS_AFTER\r")
+        try:
+            wait_until(lambda: received(beta, "FOCUS_AFTER"), "focus preserved input")
+        except AssertionError:
+            print("SCREEN AT FOCUS FAILURE:\n" + screen(), flush=True)
+            print("LAST_FOCUS", rpc.call("state.get", {"frames": False}).get("last_focus"), flush=True)
+            for name, ap in [("alpha", alpha), ("beta", beta), ("gamma", gamma)]:
+                print(name, "received", received(ap, "FOCUS_AFTER"), flush=True)
+            raise
         assert not received(gamma, "FOCUS_AFTER")
         record("confirmed_removal_preserves_focus_by_pane_identity")
 
         (home / "accounts.json").write_text("[]")
-        key("a"); ready_panel(); send("e")
+        open_panel(); ready_panel(); send("e")
         wait_until(lambda: shown("原账号档案已缺失"), "missing account stays selected")
         esc(); esc(); assert pane("alpha")["account"] == "fixture-account"
         (home / "accounts.json").write_text(json.dumps(account))
         record("missing_account_is_not_silently_replaced")
 
-        key("a"); ready_panel(); send("a"); wait_until(lambda: shown("添加 Agent"), "preset picker")
+        open_panel(); ready_panel(); send("a"); wait_until(lambda: shown("添加 Agent"), "preset picker")
         send("e"); wait_until(lambda: shown("名字"), "agent form")
         send("chat")
         catalog = rpc.call("preset.list")
@@ -213,16 +232,57 @@ def run(args):
         tab(9); send(b"\r")
         wait_until(lambda: pane("chat") and pane("chat")["state"] == "running", "ACP create"); ready_panel()
         chat = pane("chat"); wait_until(lambda: task(chat["brief_task"])["state"] == "completed", "ACP brief completion")
-        esc(); send(b"\r"); wait_until(lambda: shown("ACP 输入"), "persistent ACP composer")
+        esc(); send(b"\r"); wait_until(lambda: shown("Ctrl-J 换行"), "persistent ACP composer")
         send("direct ACP prompt\r")
         direct = wait_until(lambda: next((t for t in rpc.call("task.list") if t["prompt"] == "direct ACP prompt"), None), "ACP typed task")
         wait_until(lambda: task(direct["id"])["state"] == "completed", "ACP direct result")
         assert pane("chat")["session_id"] == chat["session_id"]
         record("ACP_persistent_input_reuses_existing_session_and_task_queue")
+
+        def find_task(prompt):
+            return next((t for t in rpc.call("task.list") if t["prompt"] == prompt), None)
+
+        # Queue visibility: while the pane is busy, Enter queues and says where.
+        hold_marker = root / "hold.marker"
+        hold = rpc.call("task.send", {"to": chat["id"], "prompt": "hold:" + str(hold_marker)})
+        wait_until(lambda: hold_marker.exists(), "hold turn started")
+        for index, text in enumerate(["first queued message", "second queued message", "third queued message"], 1):
+            send(text + "\r")
+            wait_until(lambda text=text: find_task(text) is not None, "queued message created")
+            wait_until(lambda index=index: shown("第 %d 位" % index), "queue position %d" % index)
+        screenshot = screen()
+        assert "第 3 位" in screenshot
+        key(" "); wait_until(lambda: shown("命令面板"), "queue palette")
+        send("队列"); send(b"\r")
+        try:
+            wait_until(lambda: shown("队列 · chat"), "queue panel")
+        except AssertionError:
+            print("SCREEN AT QUEUE PANEL:\n" + screen(), flush=True)
+            print("TASKS", [(t["prompt"], t["state"]) for t in rpc.call("task.list") if t["to"] == chat["id"]], flush=True)
+            raise
+        screenshot = screen()
+        assert "second queued message" in screenshot
+        send(b"\x1b[B"); send("x")
+        wait_until(lambda: task(find_task("second queued message")["id"])["state"] == "cancelled", "queued message cancelled")
+        send(b"\x1b")
+        wait_until(lambda: not shown("队列 · chat"), "queue panel closed")
+        # Interrupt-then-send is two-stage and records the cancelled reason.
+        send("after interrupt")
+        wait_until(lambda: shown("after interrupt"), "draft typed")
+        key("\r")  # Ctrl-a Enter: first press only warns
+        wait_until(lambda: shown("未完成的工作可能丢失"), "interrupt confirmation")
+        assert task(hold["id"])["state"] in ("running", "accepted", "delivered")
+        send(b"\r")  # second Enter confirms
+        wait_until(lambda: task(hold["id"])["state"] == "cancelled", "hold turn interrupted")
+        assert "中断" in task(hold["id"])["result"]
+        replacement = wait_until(lambda: find_task("after interrupt"), "replacement message queued")
+        wait_until(lambda: task(replacement["id"])["state"] == "completed", "replacement completed")
+        record("queue_positions_are_visible_queue_panel_cancels_and_interrupt_is_two_stage")
         target = root / "permission-effect.txt"
         approval_task = rpc.call("task.send", {"to": chat["id"], "prompt": "permission:" + str(target)})
-        wait_until(lambda: state()["permissions"], "permission request"); wait_until(lambda: shown("权限请求"), "permission visible")
+        wait_until(lambda: state()["permissions"], "permission request"); wait_until(lambda: shown("请求批准"), "permission visible")
         send(b"\r"); time.sleep(.1); assert state()["permissions"] and not target.exists()
+        key("p")  # approvals are non-blocking: focus the card explicitly
         send("1"); wait_until(lambda: task(approval_task["id"])["state"] == "completed", "permission rejected")
         assert not target.exists(); record("ACP_permission_priority_prevents_Enter_approval")
         peer_result = root / "peer-permissions.json"

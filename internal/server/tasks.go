@@ -136,6 +136,18 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 	if principal != "controller" && !s.hasEdgeLocked(principal, p.ID) {
 		return model.Task{}, deniedError("没有发送到此 pane 的授权连线", p.ID)
 	}
+	if a.Kind == "" {
+		a.Kind = "delegation"
+	}
+	if !contains([]string{"chat", "delegation", "handoff"}, a.Kind) {
+		return model.Task{}, errors.New("kind 必须为 chat、delegation 或 handoff")
+	}
+	if a.Kind == "chat" {
+		// Chat turns are conversation, not delegation: they never schedule a
+		// report or a handoff.
+		a.OnComplete = "none"
+		a.ReportTo = ""
+	}
 	a.To = p.ID
 	mode, err := resolveDelivery(p, a.DeliveryMode)
 	if err != nil {
@@ -210,7 +222,7 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 	if origin == "controller" {
 		origin = "human"
 	}
-	t := model.Task{ID: newID("t-"), From: principal, Origin: origin, To: a.To, Prompt: a.Prompt, State: "queued", DeliveryMode: a.DeliveryMode, OnComplete: a.OnComplete, ReportTo: a.ReportTo, ParentTask: a.ParentTask, RetryOf: retryOf, DedupeKey: a.DedupeKey, IdempotencyKey: a.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
+	t := model.Task{ID: newID("t-"), From: principal, Origin: origin, To: a.To, Prompt: a.Prompt, Kind: a.Kind, State: "queued", DeliveryMode: a.DeliveryMode, OnComplete: a.OnComplete, ReportTo: a.ReportTo, ParentTask: a.ParentTask, RetryOf: retryOf, DedupeKey: a.DedupeKey, IdempotencyKey: a.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
 	s.state.Tasks = append(s.state.Tasks, t)
 	return t, s.saveLocked()
 }
@@ -647,4 +659,180 @@ func (s *Server) cancelTask(raw json.RawMessage) (any, error) {
 		}
 	}
 	return copy, nil
+}
+
+// promotedAt moves a queued task ahead of every other queued task for its pane.
+func (s *Server) promoteTask(raw json.RawMessage) (model.Task, error) {
+	var a struct {
+		ID string `json:"id"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return model.Task{}, err
+	}
+	s.mu.Lock()
+	t := s.taskLocked(a.ID)
+	if t == nil {
+		s.mu.Unlock()
+		return model.Task{}, errors.New("任务不存在")
+	}
+	if t.State != "queued" {
+		s.mu.Unlock()
+		return model.Task{}, errors.New("只有排队中的任务可以提前")
+	}
+	var first *model.Task
+	for i := range s.state.Tasks {
+		other := &s.state.Tasks[i]
+		if other.To == t.To && other.State == "queued" && other.ID != t.ID {
+			if first == nil || other.CreatedAt.Before(first.CreatedAt) {
+				first = other
+			}
+		}
+	}
+	if first == nil {
+		copy := *t
+		s.mu.Unlock()
+		return copy, nil
+	}
+	t.CreatedAt = first.CreatedAt.Add(-time.Nanosecond)
+	t.UpdatedAt = time.Now()
+	copy := *t
+	err := s.saveLocked()
+	s.mu.Unlock()
+	if err == nil {
+		s.wake(copy.To)
+	}
+	return copy, err
+}
+
+// editTask changes the prompt of a task that has not been delivered yet.
+func (s *Server) editTask(raw json.RawMessage) (model.Task, error) {
+	var a struct {
+		ID     string `json:"id"`
+		Prompt string `json:"prompt"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return model.Task{}, err
+	}
+	if strings.TrimSpace(a.Prompt) == "" || len(a.Prompt) > 1<<20 {
+		return model.Task{}, errors.New("任务内容不能为空且不得超过 1 MiB")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.taskLocked(a.ID)
+	if t == nil {
+		return model.Task{}, errors.New("任务不存在")
+	}
+	if t.State != "queued" {
+		return model.Task{}, errors.New("只有排队中的任务可以修改")
+	}
+	if delta := len(a.Prompt) - len(t.Prompt); delta > 0 && s.taskContentBytesLocked()+delta > maxTaskContentBytes {
+		return model.Task{}, errors.New("任务内容总量已达到 64 MiB 上限")
+	}
+	t.Prompt = a.Prompt
+	t.UpdatedAt = time.Now()
+	return *t, s.saveLocked()
+}
+
+// interruptSend is the atomic "stop the current turn, then queue this message"
+// path used by the composer. It validates everything that could fail before it
+// cancels anything, so a rejected message never destroys in-flight work.
+func (s *Server) interruptSend(principal string, raw json.RawMessage) (model.Task, error) {
+	var a struct {
+		To     string `json:"to"`
+		Prompt string `json:"prompt"`
+		Kind   string `json:"kind"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return model.Task{}, err
+	}
+	if len(a.Prompt) > 1<<20 {
+		return model.Task{}, errors.New("任务内容不得超过 1 MiB")
+	}
+	if strings.TrimSpace(a.Prompt) == "" {
+		a.Prompt = ""
+	}
+	s.mu.Lock()
+	p := s.paneLocked(a.To)
+	if p == nil {
+		s.mu.Unlock()
+		return model.Task{}, errors.New("目标 pane 不存在")
+	}
+	if principal != "controller" && !s.hasEdgeLocked(principal, p.ID) {
+		s.mu.Unlock()
+		return model.Task{}, deniedError("没有发送到此 pane 的授权连线", p.ID)
+	}
+	if p.State != "running" {
+		s.mu.Unlock()
+		return model.Task{}, errors.New("not-ready: 目标 pane 没有运行，请先 restart")
+	}
+	var active []*model.Task
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if t.To == p.ID && activeState(t.State) {
+			active = append(active, t)
+		}
+	}
+	if a.Prompt == "" && len(active) == 0 {
+		s.mu.Unlock()
+		return model.Task{}, errors.New("当前没有正在执行的 turn 可以中断")
+	}
+	if a.Prompt != "" {
+		if _, err := resolveDelivery(p, "prompt"); err != nil {
+			// PTY panes do not accept the prompt path used by the composer.
+			if _, err = resolveDelivery(p, ""); err != nil {
+				s.mu.Unlock()
+				return model.Task{}, err
+			}
+		}
+		if len(s.state.Tasks) >= 2000 {
+			s.mu.Unlock()
+			return model.Task{}, errors.New("MVP 任务记录上限为 2,000 条")
+		}
+		if s.taskContentBytesLocked()+len(a.Prompt) > maxTaskContentBytes {
+			s.mu.Unlock()
+			return model.Task{}, errors.New("任务内容总量已达到 64 MiB 上限")
+		}
+	}
+	var cancels []context.CancelFunc
+	for _, t := range active {
+		if c := s.taskCancels[t.ID]; c != nil {
+			cancels = append(cancels, c)
+		}
+		t.State = "cancelled"
+		t.Result = "被新消息中断"
+		t.UpdatedAt = time.Now()
+		t.Seen = false
+		s.completeReportLocked(t)
+	}
+	var created model.Task
+	var err error
+	if a.Prompt != "" {
+		if a.Kind == "" {
+			a.Kind = "chat"
+		}
+		created, err = s.createTaskLocked(principal, model.SendParams{To: p.ID, Prompt: a.Prompt, DeliveryMode: "", Kind: a.Kind, Queue: true}, "")
+	} else {
+		err = s.saveLocked()
+	}
+	paneID := p.ID
+	s.mu.Unlock()
+	if err != nil {
+		return model.Task{}, err
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	if len(active) > 0 && p.Backend == "pty" {
+		lane := s.inputLane(paneID)
+		lane.Lock()
+		if term := s.terminals[paneID]; term != nil {
+			_ = term.Input([]byte{3})
+		}
+		lane.Unlock()
+	}
+	if created.ID != "" {
+		s.notifyNextWaiter(created.To)
+		s.wake(created.To)
+	}
+	return created, nil
 }

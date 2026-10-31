@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gdamore/tcell/v3"
+	"github.com/gdamore/tcell/v3/color"
 	"wtable/internal/model"
 )
 
@@ -189,7 +190,7 @@ func (u *ui) drawPanel() {
 
 	var lines []string
 	actions := []string{
-		"a 添加 Agent · e 编辑 · d 移除 · Enter 单看 · p 驻留 · v peek · b 重发说明",
+		"a 添加 Agent · e 编辑 · d 移除 · Enter 打开 · p 工具槽 · v peek · b 重发说明",
 		"a 添加边 · x 删除边 · t 只看当前 pane 相关（you→pane 是人类能力，不可删）",
 		"s 派活 · Enter 详情 · r 重发 · x 取消 · b 报告收件箱",
 		"n 新建 Layer · Enter 设为新 pane 的默认目录",
@@ -410,7 +411,7 @@ func (u *ui) panelMouse(e *tcell.EventMouse, pressed bool) {
 func (u *ui) panelFrame(title string, lines []string) int {
 	p := u.panel
 	w, h := u.screen.Size()
-	base := tcell.StyleDefault.Background(tcell.NewHexColor(0x1a2230)).Foreground(tcell.ColorWhite)
+	base := tcell.StyleDefault.Background(color.NewHexColor(0x1a2230)).Foreground(color.White)
 	for y := 0; y < h; y++ {
 		u.line(0, y, w, "", base)
 	}

@@ -25,6 +25,10 @@ func reportSummary(text string) string {
 // Called under the same state lock and Save as completion. Appending a handoff
 // may reallocate Tasks, so callers must reacquire task pointers afterwards.
 func (s *Server) completeReportLocked(t *model.Task) {
+	// Chat turns belong to the conversation stream, not the delegation inbox.
+	if t.Kind == "chat" {
+		return
+	}
 	if t.OnComplete == "" || t.OnComplete == "none" || !contains([]string{"unknown", "cancelled", "completed", "failed"}, t.State) {
 		return
 	}
@@ -79,7 +83,7 @@ func (s *Server) completeReportLocked(t *model.Task) {
 			r.Error = "handoff 目标不接受后续任务：" + modeErr.Error()
 		} else {
 			now := time.Now()
-			next := model.Task{ID: newID("t-"), From: t.From, Origin: t.Origin, To: recipient.ID, Prompt: fmt.Sprintf("Task %s (%s) finished with state %s.\n%s", t.ID, t.To, t.State, reportSummary(t.Result)), State: "queued", DeliveryMode: mode, ParentTask: t.ID, OnComplete: "none", CreatedAt: now, UpdatedAt: now}
+			next := model.Task{ID: newID("t-"), From: t.From, Origin: t.Origin, To: recipient.ID, Prompt: fmt.Sprintf("Task %s (%s) finished with state %s.\n%s", t.ID, t.To, t.State, reportSummary(t.Result)), Kind: "handoff", State: "queued", DeliveryMode: mode, ParentTask: t.ID, OnComplete: "none", CreatedAt: now, UpdatedAt: now}
 			if s.taskContentBytesLocked()+len(next.Prompt) > maxTaskContentBytes {
 				r.State = "undeliverable"
 				r.Error = "任务内容总量已达上限，无法创建 handoff 任务"
@@ -223,7 +227,7 @@ func (s *Server) retryTask(raw json.RawMessage) (any, error) {
 	if taskMode(old) == "steer" {
 		delivery = "push"
 	}
-	params := model.SendParams{To: a.To, Prompt: old.Prompt, DeliveryMode: delivery, Queue: a.Queue, OnComplete: old.OnComplete, ReportTo: old.ReportTo, ParentTask: old.ParentTask}
+	params := model.SendParams{To: a.To, Prompt: old.Prompt, Kind: old.Kind, DeliveryMode: delivery, Queue: a.Queue, OnComplete: old.OnComplete, ReportTo: old.ReportTo, ParentTask: old.ParentTask}
 	if p := s.paneLocked(a.To); p != nil {
 		mode, err := resolveDelivery(p, params.DeliveryMode)
 		if err != nil {

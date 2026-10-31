@@ -129,9 +129,9 @@ func run(args []string) error {
 			return printJSON(state.Panes)
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\t名称\t后端\t进程\t轮次\t目录")
+		fmt.Fprintln(w, "ID\t名称\t类型\t后端\t进程\t轮次\t目录")
 		for _, p := range state.Panes {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", p.ID, p.Name, p.Backend, p.State, p.TurnState, p.Cwd)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p.ID, p.Name, p.Kind, p.Backend, p.State, p.TurnState, p.Cwd)
 		}
 		return w.Flush()
 	case "peers":
@@ -166,11 +166,32 @@ func run(args []string) error {
 	case "role", "roles":
 		return roleCommand(args[1:], call)
 	case "audit":
+		if len(args) > 1 && args[1] == "permissions" {
+			var out []model.PermissionAudit
+			if err = call("audit.permissions", nil, &out); err != nil {
+				return err
+			}
+			return printJSON(out)
+		}
 		var out []model.DeniedEvent
 		if err = call("audit.list", nil, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
+	case "inbox":
+		var state model.Snapshot
+		if err = call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+			return err
+		}
+		if jsonMode {
+			return printJSON(state.Inbox)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "级别\t类型\t标题\t详情\t时间")
+		for _, item := range state.Inbox {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", item.Severity, item.Kind, item.Title, short(strings.ReplaceAll(item.Detail, "\n", " "), 70), item.CreatedAt.Local().Format("15:04:05"))
+		}
+		return w.Flush()
 	case "pane":
 		return paneCommand(args[1:], call)
 	case "remove":
@@ -202,6 +223,7 @@ func run(args []string) error {
 		name := fs.String("name", "", "pane 名称")
 		dir := fs.String("dir", cwd, "工作目录")
 		backend := fs.String("backend", "", "pty 或 acp（默认使用预设后端，否则 pty）")
+		kind := fs.String("kind", "", "foreground 或 worker（省略时：无前台则第一个 PTY 成为前台，ACP 永远是 worker）")
 		preset := fs.String("preset", "", "启动预设 ID")
 		role := fs.String("role", "", "角色说明")
 		roleTemplate := fs.String("role-template", "", "角色模板名称（创建时快照）")
@@ -266,7 +288,7 @@ func run(args []string) error {
 		var p model.Pane
 		spawnCtx, stop := context.WithTimeout(ctx, 45*time.Second)
 		defer stop()
-		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24,
+		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Kind: *kind, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24,
 			Preset: *preset, Role: *role, RoleTemplate: *roleTemplate, Account: *account, Layer: *layer, InjectBrief: *brief, ConnectTo: connectTo, DeliveryConfig: model.DeliveryConfig{
 				BlockedRegex: *blockedRegex, TailLines: *tailLines, SettleMS: int(settle.Milliseconds()),
 				VerifyMS: int(verify.Milliseconds()), AckTimeoutMS: int(ackTimeout.Milliseconds()),
@@ -309,6 +331,7 @@ func run(args []string) error {
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
 		key := fs.String("key", "", "任务去重键")
 		delivery := fs.String("delivery", "", "push、steer、prompt 或 pull（省略时按目标能力选择）")
+		kind := fs.String("kind", "", "chat、delegation 或 handoff（默认 delegation）")
 		queue := fs.Bool("queue", false, "目标忙时显式排队")
 		steer := fs.Bool("steer", false, "作为当前 turn 的追加要求插入（需目标声明支持且正在执行）")
 		onComplete := fs.String("on-complete", "", "none、notify 或 handoff")
@@ -328,7 +351,7 @@ func run(args []string) error {
 		}
 		var t model.Task
 		if err = call("task.send", model.SendParams{
-			To: rest[0], Prompt: strings.Join(rest[1:], " "), DedupeKey: *key,
+			To: rest[0], Prompt: strings.Join(rest[1:], " "), Kind: *kind, DedupeKey: *key,
 			DeliveryMode: mode, Queue: *queue, OnComplete: *onComplete, ReportTo: *reportTo, ParentTask: *parentTask,
 		}, &t); err != nil {
 			return err
@@ -489,9 +512,9 @@ func run(args []string) error {
 			return printJSON(tasks)
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\t来源\t目标\t状态\t送达\t送达错误\t内容")
+		fmt.Fprintln(w, "ID\t类型\t来源\t目标\t状态\t送达\t送达错误\t内容")
 		for _, t := range tasks {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", t.ID, t.From, t.To, t.State, t.DeliveryStatus, strings.ReplaceAll(t.DeliveryError, "\n", " "), strings.ReplaceAll(short(t.Prompt, 70), "\n", " "))
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", t.ID, t.Kind, t.From, t.To, t.State, t.DeliveryStatus, strings.ReplaceAll(t.DeliveryError, "\n", " "), strings.ReplaceAll(short(t.Prompt, 70), "\n", " "))
 		}
 		return w.Flush()
 	case "cancel":
@@ -680,6 +703,32 @@ func taskCommand(args []string, call func(string, any, any) error) error {
 	}
 	subcommand := args[0]
 	switch subcommand {
+	case "promote":
+		if len(args) != 2 {
+			return usage
+		}
+		var t model.Task
+		if err := call("task.promote", map[string]string{"id": args[1]}, &t); err != nil {
+			return err
+		}
+		return printJSON(t)
+	case "edit":
+		if len(args) < 3 {
+			return usage
+		}
+		text := strings.Join(args[2:], " ")
+		if text == "-" {
+			b, err := io.ReadAll(io.LimitReader(os.Stdin, (1<<20)+1))
+			if err != nil {
+				return err
+			}
+			text = string(b)
+		}
+		var t model.Task
+		if err := call("task.edit", map[string]string{"id": args[1], "prompt": text}, &t); err != nil {
+			return err
+		}
+		return printJSON(t)
 	case "done", "fail":
 		fs := flag.NewFlagSet("task "+subcommand, flag.ContinueOnError)
 		fs.BoolVar(jsonMode, "json", *jsonMode, "输出 JSON")
@@ -849,9 +898,10 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
 启动与终端：
   wtable                                  打开 TUI，自动启动本地 daemon
   wtable attach                           重新接入；Ctrl-a d 退出界面
-  wtable new [name] [--dir PATH] -- CMD...  新建真实终端
+  wtable new [name] [--dir PATH] [--kind foreground|worker] -- CMD...  新建真实终端
   wtable recruit [NAME] [OPTIONS] [-- CMD...]
     --preset ID --backend pty|acp --dir PATH --layer NAME|PATH
+    --kind foreground|worker  前台只能是 PTY；ACP 只能创建为 worker
     --role TEXT --account NAME --brief --connect TARGET
     --connect 可重复或用逗号分隔；方向为新 pane → TARGET
     layer 重名时使用路径；与 --dir 同时使用时目录必须位于该层内
@@ -880,6 +930,8 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
   wtable wait [--timeout 10m] TASK          等待已有任务
   wtable tasks | task TASK                 任务列表（含送达状态）、详情
   wtable task done|fail TASK TEXT|-        人工标记完成或失败
+  wtable task promote TASK                 把排队任务提前到队首
+  wtable task edit TASK TEXT|-             修改尚未投递的排队任务
   wtable task retry [--to PANE] [--queue] TASK  新建重试任务，保留原记录
   wtable task confirm TASK | task seen TASK   人工确认送达、标记已读
   wtable task result TASK                  读取完整结果
@@ -889,6 +941,8 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
   wtable role list | put [OPTIONS] NAME FILE | delete NAME   角色模板
   wtable audit                            最近越权拒绝记录（最多 256 条）
   wtable permissions                      查看待审批操作及选项 ID
+  wtable inbox [--json]                   收件箱：谁需要你（权限/退出/未读/任务）
+  wtable audit permissions                审批决定记录（允许/拒绝/取消/过期/未知）
   wtable approve REQUEST OPTION           明确选择权限选项
 
 Git 与运维：

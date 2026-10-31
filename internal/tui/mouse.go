@@ -1,47 +1,17 @@
 package tui
 
 import (
-	"math"
-
 	"github.com/gdamore/tcell/v3"
 )
 
 type divider struct {
 	rect
 	vertical bool
-	index    int
-	node     *viewNode
-	area     rect
+	area     rect // the content area whose ratio this divider moves
 }
 
 func (r rect) contains(x, y int) bool {
 	return x >= r.x && x < r.x+r.w && y >= r.y && y < r.y+r.h
-}
-
-func equalCuts(n int) []float64 {
-	cuts := make([]float64, n+1)
-	for i := range cuts {
-		cuts[i] = float64(i) / float64(n)
-	}
-	return cuts
-}
-
-// Cuts describe proportions of usable space, excluding one-cell dividers.
-// Small terminals relax minimum sizes rather than letting panes overlap.
-func axisPositions(total int, cuts []float64, minimum int) ([]int, int) {
-	n := len(cuts) - 1
-	gap := 1
-	if total < 2*n-1 {
-		gap = 0
-	}
-	usable := max(0, total-(n-1)*gap)
-	minimum = min(minimum, usable/n)
-	positions := make([]int, n+1)
-	positions[n] = usable
-	for i := 1; i < n; i++ {
-		positions[i] = max(positions[i-1]+minimum, min(usable-(n-i)*minimum, int(math.Round(cuts[i]*float64(usable)))))
-	}
-	return positions, gap
 }
 
 func (u *ui) mouse(e *tcell.EventMouse) {
@@ -51,7 +21,8 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 	pressed := down && !wasDown
 	u.mouseDown = down
 	// Mouse input must never change the target of an open prompt or approve it.
-	if u.graph != nil || u.picker != nil || u.help || u.mode != "" || u.pendingPaste != "" || len(u.snapshot.Permissions) > 0 || u.pasting {
+	if u.graph != nil || u.help || u.mode != "" || u.pendingPaste != "" || u.pasting ||
+		u.palette != nil || u.create != nil || u.queueView != nil {
 		u.drag = nil
 		u.selection = nil
 		return
@@ -71,47 +42,14 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 	if u.taskView {
 		u.drag = nil
 		u.selection = nil
-		if u.reportView {
-			delta := 0
-			if e.Buttons()&tcell.WheelUp != 0 {
-				delta = -1
-			}
-			if e.Buttons()&tcell.WheelDown != 0 {
-				delta = 1
-			}
-			if u.reportDetail != nil {
-				u.taskScroll = max(0, u.taskScroll+delta*3)
-			} else {
-				u.reportCursor = max(0, u.reportCursor+delta)
-			}
-			return
-		}
-		if u.taskScreen != nil {
-			return
-		}
-		if e.Buttons()&tcell.WheelUp != 0 {
-			if u.taskDetail != nil {
-				u.taskScroll = max(0, u.taskScroll-3)
-			} else {
-				u.moveTask(-1)
-			}
-		} else if e.Buttons()&tcell.WheelDown != 0 {
-			if u.taskDetail != nil {
-				u.taskScroll += 3
-			} else {
-				u.moveTask(1)
-			}
-		} else if pressed && u.taskDetail == nil {
-			w, _ := u.screen.Size()
-			width := min(90, max(1, w-4))
-			left := (w - width) / 2
-			if id := u.taskRows[y]; id != "" && x >= left && x < left+width {
-				u.readTask(id)
-			}
-		}
+		u.taskViewMouse(e, pressed)
 		return
 	}
 	if e.Buttons()&(tcell.WheelUp|tcell.WheelDown) != 0 {
+		if u.railRect.contains(x, y) {
+			u.railWheel(e)
+			return
+		}
 		u.wheel(e)
 		return
 	}
@@ -136,71 +74,159 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 		return
 	}
 	if u.drag != nil {
-		d := *u.drag
-		if d.node != nil {
-			coordinate, total, minimum := y-d.area.y, d.area.h, 3
-			if d.vertical {
-				coordinate, total, minimum = x-d.area.x, d.area.w, 8
-			}
-			usable := total - 1
-			if usable < 2 {
-				return
-			}
-			minimum = min(minimum, usable/2)
-			d.node.ratio = float64(max(minimum, min(usable-minimum, coordinate))) / float64(usable)
-			u.resize()
-			return
-		}
-		cuts, coordinate, minimum := u.rowCuts, y, 3
-		if d.vertical {
-			cuts, coordinate, minimum = u.colCuts, x, 8
-		}
-		// A divider spans the other axis; obtain the current layout extent.
-		w, h := u.screen.Size()
-		if u.tasks {
-			h -= min(6, max(0, h/3))
-		}
-		total := h - 1
-		if d.vertical {
-			total = w
-		}
-		positions, gap := axisPositions(total, cuts, minimum)
-		n := len(cuts) - 1
-		usable := positions[n]
-		if gap == 0 || usable == 0 {
-			return
-		}
-		minimum = min(minimum, usable/n)
-		position := max(positions[d.index-1]+minimum, min(positions[d.index+1]-minimum, coordinate-(d.index-1)))
-		cuts[d.index] = float64(position) / float64(usable)
-		u.resize()
+		u.dragDivider(*u.drag, x, y)
 		return
 	}
 	if !pressed {
 		return
 	}
 	u.prefix = false
-	for _, d := range u.dividers {
-		if d.contains(x, y) {
-			copy := d
+	u.interruptConfirm = false
+
+	// Rail: a click selects and opens; the rail itself gets keyboard focus via
+	// Ctrl-a a, so there is no hidden double-click mode.
+	if u.railRect.contains(x, y) {
+		if row, ok := u.railRowAt(y); ok {
+			u.rail.sel = railKeyOf(row)
+			u.area = focusRail
+			if narrowRail(u.canvas.railW) {
+				u.canvas.drawer = true
+			}
+			u.resize()
+			if row.kind == "pane" {
+				u.selectMain(row.pane.ID)
+			} else {
+				u.activateRailRow(row)
+			}
+		}
+		return
+	}
+
+	// Approval card: a click only focuses it. Decisions stay deliberate.
+	if u.approvalRect.w > 0 && u.approvalRect.contains(x, y) {
+		if len(u.permitsFor(u.canvas.main)) > 0 {
+			u.area = focusApproval
+			u.status = "审批卡已聚焦：1..9 选择 · r 拒绝 · Esc 收起"
+			u.resize()
+		}
+		return
+	}
+
+	// Composer: click on the queue bar opens the queue, elsewhere focuses input.
+	if u.composerRect.w > 0 && u.composerRect.contains(x, y) {
+		u.area = focusMain
+		if p := u.mainPane(); p != nil && y == u.composerRect.y && u.queueBarVisible(*p) && len(u.queuedForPane(p.ID)) > 0 {
+			u.openQueue(p.ID)
+		}
+		return
+	}
+
+	for i := range u.dividers {
+		if u.dividers[i].contains(x, y) {
+			copy := u.dividers[i]
 			u.drag = &copy
 			return
 		}
 	}
-	for i, p := range u.snapshot.Panes {
-		if r, ok := u.boxes[p.ID]; ok && r.contains(x, y) {
-			if previous := u.current(); previous != nil && u.focus != i {
-				u.offsets[previous.ID] = 0
-				u.copyMode = false
+
+	for _, p := range u.snapshot.Panes {
+		r, ok := u.boxes[p.ID]
+		if !ok || !r.contains(x, y) {
+			continue
+		}
+		if p.ID == u.canvas.utility {
+			u.area = focusUtility
+			u.markFocusedSeen(p.ID)
+		} else {
+			u.area = focusMain
+			if u.canvas.main != p.ID {
+				u.selectMain(p.ID)
+			} else {
+				u.markFocusedSeen(p.ID)
 			}
-			u.focus = i
-			u.tab().focus = p.ID
-			if restartable(p.State) && y == r.y+1 {
+		}
+		if restartable(p.State) {
+			content := u.contentRect(p, r)
+			if y == content.y {
 				u.restartCurrent()
 				return
 			}
-			u.startSelection(p.ID, r, x, y)
-			return
+		}
+		u.startSelection(p.ID, r, x, y)
+		return
+	}
+}
+
+func (u *ui) dragDivider(d divider, x, y int) {
+	coordinate, total := x-d.area.x, d.area.w
+	if !d.vertical {
+		coordinate, total = y-d.area.y, d.area.h
+	}
+	usable := total - 1
+	if usable < 2 {
+		return
+	}
+	ratio := float64(max(1, min(usable-1, coordinate))) / float64(usable)
+	ratio = max(.2, min(.8, ratio))
+	u.canvas.ratio = ratio
+	u.resize()
+}
+
+func (u *ui) railWheel(e *tcell.EventMouse) {
+	rows := u.selectableRows()
+	if len(rows) == 0 {
+		return
+	}
+	u.ensureRailSelection()
+	index := u.railSelectionIndex(rows)
+	if e.Buttons()&tcell.WheelUp != 0 {
+		index = max(0, index-1)
+	} else {
+		index = min(len(rows)-1, index+1)
+	}
+	u.rail.sel = railKeyOf(rows[index])
+	u.area = focusRail
+}
+
+// taskViewMouse holds the task/report list's existing row and wheel behavior.
+func (u *ui) taskViewMouse(e *tcell.EventMouse, pressed bool) {
+	if u.reportView {
+		delta := 0
+		if e.Buttons()&tcell.WheelUp != 0 {
+			delta = -1
+		}
+		if e.Buttons()&tcell.WheelDown != 0 {
+			delta = 1
+		}
+		if u.reportDetail != nil {
+			u.taskScroll = max(0, u.taskScroll+delta*3)
+		} else {
+			u.reportCursor = max(0, u.reportCursor+delta)
+		}
+		return
+	}
+	if u.taskScreen != nil {
+		return
+	}
+	if e.Buttons()&tcell.WheelUp != 0 {
+		if u.taskDetail != nil {
+			u.taskScroll = max(0, u.taskScroll-3)
+		} else {
+			u.moveTask(-1)
+		}
+	} else if e.Buttons()&tcell.WheelDown != 0 {
+		if u.taskDetail != nil {
+			u.taskScroll += 3
+		} else {
+			u.moveTask(1)
+		}
+	} else if pressed && u.taskDetail == nil {
+		w, _ := u.screen.Size()
+		width := min(90, max(1, w-4))
+		left := (w - width) / 2
+		x, y := e.Position()
+		if id := u.taskRows[y]; id != "" && x >= left && x < left+width {
+			u.readTask(id)
 		}
 	}
 }

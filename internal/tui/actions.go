@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gdamore/tcell/v3"
+	"github.com/gdamore/tcell/v3/color"
 	"github.com/rivo/uniseg"
 	"wtable/internal/model"
 )
@@ -91,34 +92,20 @@ func (u *ui) showActions(title, object string, items []actionItem) {
 
 func (u *ui) openPaneActions(p *model.Pane) {
 	pane := *p
-	parked := false
-	if _, ok := u.boxes[pane.ID]; !ok {
-		parked = true
-	}
-	park := "驻留（移到后台）"
-	if parked {
-		park = "取消驻留（放回主区域）"
+	utility := u.canvas.utility == pane.ID
+	utilityLabel := "放入工具槽"
+	if utility {
+		utilityLabel = "移出工具槽"
 	}
 	items := []actionItem{
-		{label: "打开", hint: "看它现在在做什么", run: func() {
-			u.panel = nil
-			u.openPane(pane.ID, true)
+		{label: "打开", hint: "切换主画布", run: func() {
+			u.openPaneFromOverlay(pane.ID)
 		}},
 		{label: "编辑", hint: "名字 / 角色 / 账号", run: func() {
-			u.ensurePanel(0)
-			for i, other := range u.snapshot.Panes {
-				if other.ID == pane.ID {
-					u.panel.selected = i
-				}
-			}
-			if len(u.panel.catalog.Presets) == 0 {
-				// The catalog is still loading; rebuild the form once it lands.
-				u.panel.afterLoad = "edit"
-			}
-			u.startAgentForm(true)
+			u.editPane(pane)
 		}},
 		{label: "回看输出", hint: "滚动看历史", run: func() { u.peekPane(pane) }},
-		{label: park, run: func() { u.togglePark(pane.ID) }},
+		{label: utilityLabel, run: func() { u.putUtility(pane.ID) }},
 		{label: "派活给 " + pane.Name, hint: "开一张任务单", run: func() {
 			u.startSendForm()
 			u.preselectTarget(pane.ID)
@@ -141,11 +128,7 @@ func (u *ui) openPaneActions(p *model.Pane) {
 			}
 		}},
 		{label: "重启", hint: "进程已退出时可用", run: func() {
-			for i, other := range u.snapshot.Panes {
-				if other.ID == pane.ID {
-					u.focus = i
-				}
-			}
+			u.openPaneFromOverlay(pane.ID)
 			u.restartCurrent()
 		}},
 		{label: "复制 pane ID", run: func() { u.copyText(pane.ID, "已复制 "+pane.ID) }},
@@ -175,14 +158,8 @@ func (u *ui) openEdgeActions(e model.Edge) {
 				}
 			}
 		}},
-		{label: "打开来源 pane", run: func() {
-			u.panel = nil
-			u.openPane(edge.From, true)
-		}},
-		{label: "打开目标 pane", run: func() {
-			u.panel = nil
-			u.openPane(edge.To, true)
-		}},
+		{label: "打开来源 pane", run: func() { u.openPaneFromOverlay(edge.From) }},
+		{label: "打开目标 pane", run: func() { u.openPaneFromOverlay(edge.To) }},
 		{label: "复制", hint: "来源 → 目标", run: func() {
 			u.copyText(u.paneName(edge.From)+" → "+u.paneName(edge.To), "已复制这条边")
 		}},
@@ -210,16 +187,8 @@ func (u *ui) openTaskActions(id string) {
 			u.openTasks()
 			u.readTask(task.ID)
 		}},
-		{label: "打开目标 pane", hint: u.paneName(task.To), run: func() {
-			u.taskView = false
-			u.panel = nil
-			u.openPane(task.To, true)
-		}},
-		{label: "打开来源", hint: u.paneName(task.From), run: func() {
-			u.taskView = false
-			u.panel = nil
-			u.openPane(task.From, true)
-		}},
+		{label: "打开目标 pane", hint: u.paneName(task.To), run: func() { u.openPaneFromOverlay(task.To) }},
+		{label: "打开来源", hint: u.paneName(task.From), run: func() { u.openPaneFromOverlay(task.From) }},
 		{label: "重发", hint: "只对失败 / 未知 / 写入未确认", run: func() {
 			var out model.Task
 			if u.call("task.retry", map[string]string{"id": task.ID}, &out) {
@@ -308,8 +277,8 @@ func (u *ui) openGraphEdgeActions(e model.GraphEdge) {
 	edge := model.Edge{From: e.From, To: e.To}
 	items := []actionItem{
 		{label: "查看这个方向的任务", run: func() { u.graph = nil; u.openPanel(2) }},
-		{label: "打开来源 pane", run: func() { u.graph = nil; u.openPane(edge.From, true) }},
-		{label: "打开目标 pane", run: func() { u.graph = nil; u.openPane(edge.To, true) }},
+		{label: "打开来源 pane", run: func() { u.openPaneFromOverlay(edge.From) }},
+		{label: "打开目标 pane", run: func() { u.openPaneFromOverlay(edge.To) }},
 	}
 	if e.Kind != "virtual" {
 		items = append(items, actionItem{label: "删除这条授权边", danger: true, run: func() {
@@ -434,8 +403,8 @@ func (u *ui) drawActions() {
 	height := min(len(m.items)+6, max(4, h-2))
 	x0 := (w - width) / 2
 	y0 := (h - height) / 2
-	base := tcell.StyleDefault.Background(tcell.NewHexColor(0x22303f)).Foreground(tcell.ColorWhite)
-	dim := base.Foreground(tcell.NewHexColor(0x8fa3b8))
+	base := tcell.StyleDefault.Background(color.NewHexColor(0x22303f)).Foreground(color.White)
+	dim := base.Foreground(color.NewHexColor(0x8fa3b8))
 	_ = dim
 	for row := 0; row < height; row++ {
 		u.line(x0, y0+row, width, "", base)
@@ -452,10 +421,10 @@ func (u *ui) drawActions() {
 		style := base
 		if i == m.cursor {
 			marker = " › "
-			style = tcell.StyleDefault.Background(tcell.NewHexColor(0x2f4a63)).Foreground(tcell.ColorWhite)
+			style = tcell.StyleDefault.Background(color.NewHexColor(0x2f4a63)).Foreground(color.White)
 		}
 		if item.danger {
-			style = style.Foreground(tcell.NewHexColor(0xff9a8a))
+			style = style.Foreground(color.NewHexColor(0xff9a8a))
 		}
 		line := fmt.Sprintf("%s%d. %s", marker, i+1, item.label)
 		if item.hint != "" {

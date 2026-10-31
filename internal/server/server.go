@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -108,6 +109,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 			p.Error = "daemon 已重启；请显式重启此 pane"
 		}
 	}
+	migratePaneKinds(&state)
 	for i := range state.Tasks {
 		if activeState(state.Tasks[i].State) {
 			state.Tasks[i].State = "unknown"
@@ -390,7 +392,7 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 		r.Error = short(r.Error, 500)
 		reports = append(reports, r)
 	}
-	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Reports: reports, Layers: append([]model.Layer{}, s.state.Layers...)}
+	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Reports: reports, Layers: append([]model.Layer{}, s.state.Layers...), LastFocus: s.state.LastFocus}
 	terms := map[string]*terminal.Terminal{}
 	for _, p := range s.state.Panes {
 		result.Panes = append(result.Panes, s.paneMetadataLocked(p))
@@ -406,6 +408,16 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 	for _, a := range s.approvals {
 		result.Permissions = append(result.Permissions, a.permission)
 	}
+	// Map iteration order is random; a stable order lets a human process the
+	// oldest request first instead of chasing a reshuffled list every poll.
+	sort.Slice(result.Permissions, func(i, j int) bool {
+		a, b := result.Permissions[i], result.Permissions[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		return a.ID < b.ID
+	})
+	result.Inbox = deriveInbox(result)
 	s.mu.Unlock()
 	if args.Graph {
 		result.Graph = snapshotGraph(result)
@@ -470,6 +482,39 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 			s.writer = 0
 		}
 		return true, nil
+	case "ui.focus":
+		var a struct {
+			ID string `json:"id"`
+		}
+		if err := decode(raw, &a); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		p := s.paneLocked(a.ID)
+		if p == nil {
+			return nil, errors.New("pane 不存在")
+		}
+		s.state.LastFocus = p.ID
+		p.Unread = 0
+		// Opening a pane is the human's read acknowledgement: clear the
+		// finished results and reports addressed to it in the same commit.
+		for i := range s.state.Tasks {
+			t := &s.state.Tasks[i]
+			if t.To == p.ID && !t.Seen && contains([]string{"completed", "failed", "unknown"}, t.State) {
+				t.Seen = true
+			}
+		}
+		for i := range s.state.Reports {
+			if s.state.Reports[i].To == p.ID {
+				s.state.Reports[i].Seen = true
+			}
+		}
+		return true, s.saveLocked()
+	case "audit.permissions":
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return append([]model.PermissionAudit{}, s.state.Decisions...), nil
 	case "state.get":
 		return s.snapshot(raw)
 	case "audit.list":
@@ -495,7 +540,7 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 	case "pane.peek":
 		return s.peek(raw)
 	case "preset.list":
-		return s.catalog()
+		return s.catalog(raw)
 	case "pane.update":
 		var a model.PaneUpdate
 		if err := decode(raw, &a); err != nil {
@@ -636,6 +681,12 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		return s.getTasks(c.principal, method, raw)
 	case "task.cancel":
 		return s.cancelTask(raw)
+	case "task.promote":
+		return s.promoteTask(raw)
+	case "task.edit":
+		return s.editTask(raw)
+	case "task.interrupt_send":
+		return s.interruptSend(c.principal, raw)
 	case "permission.reply":
 		return true, s.replyPermission(raw)
 	case "layer.create":

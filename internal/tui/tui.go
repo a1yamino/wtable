@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -19,56 +18,72 @@ import (
 )
 
 type rect struct{ x, y, w, h int }
+
 type ui struct {
-	actions                             *actionMenu
-	ctx                                 context.Context
-	client                              *rpc.Client
-	screen                              tcell.Screen
-	cwd                                 string
-	snapshot                            model.Snapshot
-	focus                               int
-	layout                              int
-	zoom, tasks, prefix, help, copyMode bool
-	offsets                             map[string]int
-	sizes                               map[string][2]int
-	boxes                               map[string]rect
-	mode, status                        string
-	editor                              lineEdit
-	taskView                            bool
-	taskCursor                          string
-	taskDetail                          *model.Task
-	taskScroll                          int
-	taskRows                            map[int]string
-	reportView                          bool
-	reportCursor                        int
-	reportDetail                        *model.Report
-	taskActionID                        string
-	taskDelivery                        string
-	taskQueue                           bool
-	taskScreen                          *model.Frame
-	panel                               *controlPanel
-	graph                               *graphView
-	panelResults                        chan panelResult
-	activeCwd, activeLayer              string
-	acpInputs                           map[string]*lineEdit
-	pasting                             bool
-	paste                               strings.Builder
-	pendingPaste                        string
-	lastPermission                      string
-	lastDrawKey                         string
-	lastDrawSnapshot                    model.Snapshot
-	colCuts, rowCuts                    []float64
-	layoutKey                           [2]int
-	dividers                            []divider
-	drag                                *divider
-	mouseDown                           bool
-	selection                           *textSelection
-	views                               []viewTab
-	viewIndex, nextTab                  int
-	parked                              map[string]bool
-	picker                              *panePicker
-	refreshFailed                       bool
-	lastReconnect                       time.Time
+	actions                *actionMenu
+	ctx                    context.Context
+	client                 *rpc.Client
+	screen                 tcell.Screen
+	cwd                    string
+	snapshot               model.Snapshot
+	focus                  int
+	prefix, help, copyMode bool
+	offsets                map[string]int
+	sizes                  map[string][2]int
+	boxes                  map[string]rect
+	mode, status           string
+	editor                 lineEdit
+	taskView               bool
+	taskCursor             string
+	taskDetail             *model.Task
+	taskScroll             int
+	taskRows               map[int]string
+	reportView             bool
+	reportCursor           int
+	reportDetail           *model.Report
+	taskActionID           string
+	taskDelivery           string
+	taskScreen             *model.Frame
+	panel                  *controlPanel
+	graph                  *graphView
+	panelResults           chan panelResult
+	activeCwd, activeLayer string
+	acpInputs              map[string]*lineEdit
+	pasting                bool
+	paste                  strings.Builder
+	pendingPaste           string
+	lastDrawKey            string
+	lastDrawSnapshot       model.Snapshot
+	dividers               []divider
+	drag                   *divider
+	mouseDown              bool
+	selection              *textSelection
+	refreshFailed          bool
+	lastReconnect          time.Time
+
+	// Interaction redesign: rail + one main canvas + one utility slot.
+	canvas           canvas
+	area             focusArea
+	rail             railState
+	approval         approvalState
+	palette          *paletteView
+	create           *createView
+	queueView        *queueView
+	interruptConfirm bool
+	lastSent         map[string]string
+	seenGlyphs       map[string]bool
+	knownPermissions map[string]bool
+	lastFocusSent    string
+	allowChat        bool
+	utilityLast      string
+	quit             bool
+
+	railRect     rect
+	railHits     map[int]railRow
+	mainRect     rect
+	utilRect     rect
+	approvalRect rect
+	composerRect rect
 }
 
 // Run attaches the control UI. Leaving the UI detaches; daemon panes keep running.
@@ -89,7 +104,7 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 	defer screen.Fini()
 	screen.EnablePaste()
 	screen.EnableMouse(tcell.MouseDragEvents)
-	u := &ui{ctx: ctx, client: client, screen: screen, cwd: cwd, offsets: map[string]int{}, sizes: map[string][2]int{}, boxes: map[string]rect{}}
+	u := &ui{ctx: ctx, client: client, screen: screen, cwd: cwd, offsets: map[string]int{}, sizes: map[string][2]int{}, boxes: map[string]rect{}, knownPermissions: map[string]bool{}, lastSent: map[string]string{}}
 	defer func() {
 		if u.client == nil {
 			return
@@ -101,11 +116,11 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 	if _, err = u.refresh(); err != nil {
 		return err
 	}
+	u.syncCanvas()
 	if len(u.snapshot.Panes) == 0 {
-		u.spawn(nil)
-		if _, err = u.refresh(); err != nil {
-			return err
-		}
+		u.openCreate(model.PaneForeground)
+	} else if u.canvas.main != "" {
+		u.markFocusedSeen(u.canvas.main)
 	}
 	u.resize()
 	u.draw()
@@ -150,6 +165,9 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 					return nil
 				}
 			}
+			// Overlays change which panes are visible, so recompute the canvas
+			// rects after every event instead of waiting for a snapshot change.
+			u.resize()
 			u.draw()
 		case <-ticker.C:
 			changed, err := u.refresh()
@@ -252,29 +270,24 @@ func (u *ui) callWithin(timeout time.Duration, method string, args, out any) boo
 	}
 	return true
 }
+
 func (u *ui) refresh() (bool, error) {
-	focusedID := ""
-	if p := u.current(); p != nil {
-		focusedID = p.ID
-	}
-	var next model.Snapshot
-	ids := []string{}
+	ids := make([]string, 0, len(u.boxes))
 	for id := range u.boxes {
 		ids = append(ids, id)
 	}
+	var next model.Snapshot
 	ctx, cancel := context.WithTimeout(u.ctx, 3*time.Second)
 	defer cancel()
-	if err := u.client.Call(ctx, "state.get", map[string]any{"offsets": u.offsets, "ids": ids, "graph": true, "frames": u.graph == nil}, &next); err != nil {
+	// Frames are requested only for the panes actually drawn. Background panes
+	// keep their last size and stay cheap to poll.
+	if err := u.client.Call(ctx, "state.get", map[string]any{"offsets": u.offsets, "ids": ids, "graph": true, "frames": u.graph == nil && u.panel == nil && !u.taskView}, &next); err != nil {
 		return false, err
 	}
 	changed := !reflect.DeepEqual(u.snapshot, next)
 	u.snapshot = next
-	for i, p := range next.Panes {
-		if p.ID == focusedID {
-			u.focus = i
-			break
-		}
-	}
+	u.syncCanvas()
+	u.detectNewPermissions()
 	if u.taskDetail != nil {
 		for _, t := range next.Tasks {
 			if t.ID == u.taskDetail.ID && !t.UpdatedAt.Equal(u.taskDetail.UpdatedAt) {
@@ -289,45 +302,27 @@ func (u *ui) refresh() (bool, error) {
 	if u.focus >= len(next.Panes) {
 		u.focus = max(0, len(next.Panes)-1)
 	}
-	u.syncViews()
-	u.markVisibleSeen()
-	if len(next.Permissions) > 0 && next.Permissions[0].ID != u.lastPermission {
-		u.lastPermission = next.Permissions[0].ID
-		// Do not reinterpret buffered paste as a permission decision.
-		u.pendingPaste = ""
-	}
 	return changed, nil
 }
-func (u *ui) current() *model.Pane {
-	if u.focus < 0 || u.focus >= len(u.snapshot.Panes) {
-		return nil
-	}
-	return &u.snapshot.Panes[u.focus]
-}
-func (u *ui) spawn(command []string) bool {
-	if len(command) == 0 {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/zsh"
+
+// detectNewPermissions announces arrivals without taking focus or clearing a
+// draft. The request stays where it belongs: the rail, the title and its card.
+func (u *ui) detectNewPermissions() {
+	present := map[string]bool{}
+	for _, p := range u.snapshot.Permissions {
+		present[p.ID] = true
+		if !u.knownPermissions[p.ID] {
+			name := p.PaneID
+			if pane := u.paneByID(p.PaneID); pane != nil {
+				name = pane.Name
+			}
+			u.legendOnce(glyphApproval)
+			u.status = "⏳ " + name + " 请求批准 · Ctrl-a p 处理"
 		}
-		command = []string{shell}
 	}
-	var pane model.Pane
-	cwd := u.activeCwd
-	if cwd == "" {
-		cwd = u.cwd
-	}
-	if u.activeLayer != "" {
-		cwd = ""
-	}
-	if u.call("pane.spawn", model.SpawnParams{Backend: "pty", Command: command, Cwd: cwd, Layer: u.activeLayer, Cols: 80, Rows: 24}, &pane) {
-		_, _ = u.refresh()
-		u.openPane(pane.ID, true)
-		u.status = "已新建终端 " + pane.Name
-		return true
-	}
-	return false
+	u.knownPermissions = present
 }
+
 func (u *ui) send(data string) {
 	p := u.current()
 	if p == nil || p.Backend != "pty" || data == "" {
@@ -339,13 +334,14 @@ func (u *ui) send(data string) {
 	u.offsets[p.ID] = 0
 	u.call("pane.input", map[string]string{"id": p.ID, "data": data}, nil)
 }
+
 func (u *ui) handlePaste(data string) {
 	u.selection = nil
-	if u.graph != nil || u.picker != nil {
+	if u.graph != nil || u.palette != nil || u.create != nil || u.queueView != nil || u.area == focusRail || u.area == focusApproval {
 		return
 	}
 	if u.panel != nil && !u.taskView && u.mode == "" {
-		if u.panel.form != "" && !u.panel.busy && len(u.snapshot.Permissions) == 0 {
+		if u.panel.form != "" && !u.panel.busy {
 			f := &u.panel.fields[u.panel.field]
 			if len(f.options) == 0 && !f.multi {
 				f.edit.Insert(data)
@@ -354,10 +350,6 @@ func (u *ui) handlePaste(data string) {
 		return
 	}
 	if (u.taskView && u.mode == "") || u.help || u.pendingPaste != "" {
-		return
-	}
-	if len(u.snapshot.Permissions) > 0 {
-		u.status = "权限请求期间已忽略粘贴，请逐键选择"
 		return
 	}
 	if u.mode != "" {
@@ -395,19 +387,6 @@ func (u *ui) key(e *tcell.EventKey) bool {
 			return false
 		}
 	}
-	if len(u.snapshot.Permissions) > 0 {
-		p := u.snapshot.Permissions[0]
-		option := ""
-		if k != tcell.KeyEscape {
-			if len(s) != 1 || s[0] < '1' || s[0] > '9' || int(s[0]-'1') >= len(p.Options) {
-				return false
-			}
-			option = p.Options[int(s[0]-'1')].ID
-		}
-		u.call("permission.reply", map[string]string{"id": p.ID, "option_id": option}, nil)
-		_, _ = u.refresh()
-		return false
-	}
 	if u.pendingPaste != "" {
 		if s == "y" {
 			u.send(u.pendingPaste)
@@ -429,12 +408,20 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		u.actionKey(e)
 		return false
 	}
-	if u.graph != nil {
-		u.graphKey(e)
+	if u.palette != nil {
+		u.paletteKey(e)
+		return u.quit
+	}
+	if u.create != nil {
+		u.createKey(e)
 		return false
 	}
-	if u.picker != nil {
-		u.pickerKey(e)
+	if u.queueView != nil {
+		u.queueKey(e)
+		return false
+	}
+	if u.graph != nil {
+		u.graphKey(e)
 		return false
 	}
 	if u.taskView {
@@ -474,82 +461,33 @@ func (u *ui) key(e *tcell.EventKey) bool {
 	}
 	if u.prefix {
 		u.prefix = false
-		switch s {
-		case "?":
-			u.help = true
-		case "G":
-			u.openGraph()
-		case "a":
-			u.openPanel(0)
-		case "n":
-			u.spawn(nil)
-			_, _ = u.refresh()
-			u.resize()
-		case "c":
-			u.openPanel(0)
-			u.panel.afterLoad = "custom"
-		case "o":
-			if len(u.snapshot.Panes) > 0 {
-				u.openPane(u.snapshot.Panes[(u.focus+1)%len(u.snapshot.Panes)].ID, true)
-			}
-			u.resize()
-		case "f":
-			u.pickPane("")
-		case "|", "-":
-			u.pickPane(s)
-		case "T":
-			u.newTab()
-		case "{":
-			u.switchTab(-1)
-		case "}":
-			u.switchTab(1)
-		case "W":
-			u.closeTab()
-		case ",":
-			u.openInput("tab-name", u.tab().name)
-		case "!":
-			u.nextAttention()
-		case "s":
-			u.layout = (u.layout + 1) % 3
-			u.arrangeView()
-			u.resize()
-		case "z":
-			u.zoom = !u.zoom
-			u.tab().zoom = u.zoom
-			u.resize()
-		case "b":
-			u.tasks = !u.tasks
-			u.resize()
-		case "[":
-			u.copyMode = true
-		case "t":
-			u.openPanel(2)
-			u.panel.afterLoad = "send"
-		case "g":
-			u.openPanel(1)
-			u.panel.afterLoad = "edge"
-		case "r":
-			u.openPanel(1)
-		case "k":
-			u.openPanel(2)
-		case "R":
-			u.restartCurrent()
-		case "x":
-			u.openInput("stop", "")
-		case "d", "q":
-			return true
+		return u.prefixKey(e)
+	}
+	// Ctrl-a Enter is two-stage: the first press only explains, the second
+	// confirms. Esc cancels the confirmation but keeps the draft.
+	if u.interruptConfirm {
+		switch k {
+		case tcell.KeyEnter:
+			u.interruptCurrent()
+			return false
+		case tcell.KeyEscape:
+			u.interruptConfirm = false
+			u.status = "已取消中断"
+			return false
 		default:
-			if k == tcell.KeyCtrlA {
-				u.send("\x01")
-			}
+			u.interruptConfirm = false
 		}
-		return false
 	}
 	if k == tcell.KeyCtrlA || (s == "a" && e.Modifiers()&tcell.ModCtrl != 0) {
 		u.prefix = true
 		return false
 	}
-	if u.navKey(e) {
+	if u.area == focusRail {
+		u.railKey(e)
+		return false
+	}
+	if u.area == focusApproval {
+		u.approvalKey(e)
 		return false
 	}
 	p := u.current()
@@ -559,89 +497,160 @@ func (u *ui) key(e *tcell.EventKey) bool {
 	if _, visible := u.boxes[p.ID]; !visible {
 		return false
 	}
-	if p != nil && restartable(p.State) && k == tcell.KeyEnter {
+	if p.Backend == "acp" {
+		u.composerKey(e, p)
+		return false
+	}
+	if restartable(p.State) && k == tcell.KeyEnter {
 		u.restartCurrent()
 		return false
 	}
-	if p != nil && p.Backend == "acp" {
-		u.acpKey(e, p)
-		return false
-	}
-	app := p != nil && p.Frame != nil && p.Frame.AppCursor
+	app := p.Frame != nil && p.Frame.AppCursor
 	u.send(encodeKey(e, app))
 	return false
 }
+
+// prefixKey handles the one leader key. Everything here is either a daily
+// action or opens the command palette; there are no hidden modes.
+func (u *ui) prefixKey(e *tcell.EventKey) bool {
+	k, s := e.Key(), e.Str()
+	// Legacy/CSI-u may report the second Ctrl-a as a rune with ModCtrl.
+	if k == tcell.KeyCtrlA || (s == "a" && e.Modifiers()&tcell.ModCtrl != 0) {
+		u.send("\x01")
+		return false
+	}
+	switch k {
+	case tcell.KeyUp:
+		u.nextPane(-1)
+		return false
+	case tcell.KeyDown:
+		u.nextPane(1)
+		return false
+	case tcell.KeyLeft:
+		u.focusMainArea()
+		return false
+	case tcell.KeyRight:
+		u.focusUtilityArea()
+		return false
+	case tcell.KeyEnter:
+		u.interruptCurrent()
+		return false
+	}
+	if len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
+		u.jumpToNth(int(s[0] - '0'))
+		return false
+	}
+	switch s {
+	case "j":
+		u.nextPane(1)
+	case "k":
+		u.nextPane(-1)
+	case "h", "l":
+		if s == "h" {
+			u.focusMainArea()
+		} else {
+			u.focusUtilityArea()
+		}
+	case "a":
+		u.focusRail()
+	case "p":
+		u.processNextApproval()
+	case "s":
+		u.toggleUtility()
+	case "t":
+		u.openTaskComposer()
+	case " ":
+		u.openPalette()
+	case "?":
+		u.help = true
+	case "G":
+		u.openGraph()
+	case "n":
+		u.openCreate(model.PaneWorker)
+	case "b":
+		u.openPanel(2)
+	case "q", "d":
+		return true
+	default:
+		u.status = "未知的 Ctrl-a 组合；Ctrl-a Space 打开命令面板"
+	}
+	return false
+}
+
+// focusMainArea / focusUtilityArea switch keyboard focus without changing the
+// canvas. Missing utility is explained, never guessed.
+func (u *ui) focusMainArea() {
+	u.area = focusMain
+	if u.canvas.main != "" {
+		u.markFocusedSeen(u.canvas.main)
+	}
+}
+
+func (u *ui) focusUtilityArea() {
+	if u.canvas.utility == "" {
+		u.status = "没有工具槽；Ctrl-a s 打开一个"
+		return
+	}
+	u.area = focusUtility
+	u.markFocusedSeen(u.canvas.utility)
+}
+
 func (u *ui) openInput(mode, initial string) {
 	u.mode = mode
 	u.editor.Begin(mode, initial)
 	if mode == "task" {
 		u.taskDelivery = ""
-		u.taskQueue = false
 	}
 	u.selection = nil
 }
+
 func (u *ui) edit(e *tcell.EventKey) {
-	if u.mode == "task" && e.Key() == tcell.KeyTab {
-		if p := u.current(); p != nil && p.Backend == "pty" {
-			if u.taskDelivery == "claim" {
-				u.taskDelivery = "inject"
-			} else {
-				u.taskDelivery = "claim"
-			}
+	if u.mode == "task" {
+		if e.Key() == tcell.KeyTab || e.Key() == tcell.KeyBacktab {
+			u.cycleTaskMode(e.Key() == tcell.KeyBacktab)
+			return
 		}
-		return
-	}
-	if u.mode == "task" && e.Key() == tcell.KeyCtrlQ {
-		u.taskQueue = !u.taskQueue
-		return
+		if u.interruptConfirm && e.Key() != tcell.KeyEnter {
+			u.interruptConfirm = false
+		}
 	}
 	if e.Key() == tcell.KeyEscape {
 		u.mode = ""
 		u.editor.Set("")
+		u.interruptConfirm = false
 		return
 	}
 	// Legacy ESC+Return is reported by tcell as Alt+Ctrl+M; CSI-u uses Enter.
 	altEnter := e.Modifiers()&tcell.ModAlt != 0 && (e.Key() == tcell.KeyEnter || (e.Key() == tcell.KeyRune && e.Modifiers()&tcell.ModCtrl != 0 && e.Str() == "m"))
-	if u.mode == "task" && altEnter {
+	ctrlJ := e.Key() == tcell.KeyCtrlJ || (e.Key() == tcell.KeyRune && e.Str() == "j" && e.Modifiers()&tcell.ModCtrl != 0)
+	if u.mode == "task" && (altEnter || ctrlJ) {
 		u.editor.Insert("\n")
 		return
 	}
 	if e.Key() == tcell.KeyEnter {
 		input, mode := u.editor.Text(), u.mode
 		switch mode {
-		case "tab-name":
-			name := strings.TrimSpace(input)
-			if name == "" {
-				u.status = "请输入 tab 名称"
-				return
-			}
-			u.tab().name = truncateColumns(name, 24)
 		case "command":
 			if strings.TrimSpace(input) == "" {
 				return
 			}
-			if !u.spawn([]string{"/bin/zsh", "-lc", input}) {
-				return
-			}
-			_, _ = u.refresh()
-			u.resize()
+			u.spawnShell([]string{"/bin/zsh", "-lc", input})
 		case "task":
-			p := u.current()
-			if p == nil || strings.TrimSpace(input) == "" {
+			u.submitTaskComposer(input)
+			return
+		case "queue-edit":
+			if strings.TrimSpace(input) == "" || u.taskActionID == "" {
 				u.status = "请输入任务内容"
 				return
 			}
-			var task model.Task
-			if !u.call("task.send", model.SendParams{To: p.ID, Prompt: input, DeliveryMode: u.taskDelivery, Queue: u.taskQueue}, &task) {
-				return
+			var t model.Task
+			if u.call("task.edit", map[string]string{"id": u.taskActionID, "prompt": input}, &t) {
+				u.status = "已更新排队任务 " + shortTask(t.ID)
+				_, _ = u.refresh()
 			}
-			u.status = "任务 " + shortTask(task.ID) + " → " + p.Name + "：" + task.State
-			if task.DeliveryMode == "claim" {
-				u.status += " · 等待 Agent 领取"
-			}
-			u.tasks = true
-			_, _ = u.refresh()
-			u.resize()
+		case "rail-filter":
+			u.rail.filter = strings.TrimSpace(input)
+			u.railSelectFirst()
 		case "task-done", "task-fail", "task-redirect", "task-confirm-stop", "task-raw":
 			if !u.submitTaskAction(mode, input) {
 				return
@@ -677,6 +686,7 @@ func (u *ui) edit(e *tcell.EventKey) {
 	}
 	u.editor.Handle(e)
 }
+
 func (u *ui) copyVisible() {
 	p := u.current()
 	if p == nil {

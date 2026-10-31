@@ -99,6 +99,13 @@ type PaneUpdate struct {
 	Account      string  `json:"account"`
 }
 
+// Pane kinds separate the pane a human talks to from background workers.
+// Empty means "not assigned yet"; the server infers it once on older state.
+const (
+	PaneForeground = "foreground"
+	PaneWorker     = "worker"
+)
+
 type Pane struct {
 	RoleTemplate     string         `json:"role_template,omitempty"`
 	RoleInstructions string         `json:"role_instructions,omitempty"`
@@ -111,7 +118,9 @@ type Pane struct {
 	DeniedCount      int            `json:"denied_count,omitempty"`
 	ID               string         `json:"id"`
 	Name             string         `json:"name"`
-	Backend          string         `json:"backend"` // pty or acp
+	Kind             string         `json:"kind,omitempty"` // foreground or worker
+	Backend          string         `json:"backend"`        // pty or acp
+	Unread           int            `json:"unread,omitempty"`
 	Command          []string       `json:"command"`
 	Cwd              string         `json:"cwd"`
 	State            string         `json:"state"` // starting, running, exited, failed, interrupted
@@ -169,7 +178,8 @@ type Task struct {
 	From           string     `json:"from"`
 	To             string     `json:"to"`
 	Prompt         string     `json:"prompt"`
-	State          string     `json:"state"` // queued, delivered, accepted, completed, failed, unknown, cancelling, cancelled
+	Kind           string     `json:"kind,omitempty"` // chat, delegation, handoff
+	State          string     `json:"state"`          // queued, delivered, accepted, completed, failed, unknown, cancelling, cancelled
 	DeliveryMode   string     `json:"delivery_mode,omitempty"`
 	DeliveryStatus string     `json:"delivery_status,omitempty"`
 	DeliveryError  string     `json:"delivery_error,omitempty"`
@@ -196,14 +206,17 @@ type Task struct {
 type SendParams struct {
 	To             string `json:"to"`
 	Prompt         string `json:"prompt"`
+	Kind           string `json:"kind,omitempty"`
 	DedupeKey      string `json:"dedupe_key,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	DeliveryMode   string `json:"delivery_mode,omitempty"`
-	Queue          bool   `json:"queue,omitempty"`
-	OnComplete     string `json:"on_complete,omitempty"`
-	ReportTo       string `json:"report_to,omitempty"`
-	ParentTask     string `json:"parent_task,omitempty"`
-	Steer          bool   `json:"steer,omitempty"`
+	// Queue asks the server to keep the task queued when the target is busy.
+	// It is not a hold flag: an idle target may take the task immediately.
+	Queue      bool   `json:"queue,omitempty"`
+	OnComplete string `json:"on_complete,omitempty"`
+	ReportTo   string `json:"report_to,omitempty"`
+	ParentTask string `json:"parent_task,omitempty"`
+	Steer      bool   `json:"steer,omitempty"`
 }
 
 type Report struct {
@@ -228,10 +241,50 @@ type PermissionOption struct {
 }
 
 type Permission struct {
-	ID      string             `json:"id"`
-	PaneID  string             `json:"pane_id"`
-	Title   string             `json:"title"`
-	Options []PermissionOption `json:"options"`
+	ID        string             `json:"id"`
+	PaneID    string             `json:"pane_id"`
+	Title     string             `json:"title"`
+	Kind      string             `json:"kind,omitempty"`
+	Locations []string           `json:"locations,omitempty"`
+	Preview   string             `json:"preview,omitempty"`
+	Options   []PermissionOption `json:"options"`
+	CreatedAt time.Time          `json:"created_at"`
+	ExpiresAt time.Time          `json:"expires_at"`
+}
+
+// PermissionAudit records an explicit decision (or an expiry) so the question
+// "who approved what, and when" stays answerable after the request is gone.
+type PermissionAudit struct {
+	PermissionID string    `json:"permission_id"`
+	PaneID       string    `json:"pane_id"`
+	Decision     string    `json:"decision"` // allow, deny, cancel, expired, unknown
+	OptionID     string    `json:"option_id,omitempty"`
+	OptionKind   string    `json:"option_kind,omitempty"`
+	Title        string    `json:"title"`
+	Batch        bool      `json:"batch,omitempty"`
+	At           time.Time `json:"at"`
+}
+
+// Inbox severities drive ordering and the single glyph per rail row.
+const (
+	InboxBlocking = "blocking"
+	InboxAction   = "action"
+	InboxInfo     = "info"
+)
+
+// InboxItem is a derived, human-view event. It never grants access by itself.
+type InboxItem struct {
+	ID           string    `json:"id"`
+	Kind         string    `json:"kind"` // permission, pane, delivery, task, report, unread
+	Severity     string    `json:"severity"`
+	PaneID       string    `json:"pane_id,omitempty"`
+	TaskID       string    `json:"task_id,omitempty"`
+	PermissionID string    `json:"permission_id,omitempty"`
+	ReportID     string    `json:"report_id,omitempty"`
+	Title        string    `json:"title"`
+	Detail       string    `json:"detail,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	Seen         bool      `json:"seen"`
 }
 
 type Layer struct {
@@ -248,12 +301,15 @@ type Snapshot struct {
 	Layers      []Layer      `json:"layers"`
 	Permissions []Permission `json:"permissions"`
 	Reports     []Report     `json:"reports"`
+	Inbox       []InboxItem  `json:"inbox,omitempty"`
 	Graph       *Graph       `json:"graph,omitempty"`
+	LastFocus   string       `json:"last_focus,omitempty"`
 	Revision    uint64       `json:"revision"`
 }
 
 type SpawnParams struct {
 	RoleTemplate   string         `json:"role_template,omitempty"`
+	Kind           string         `json:"kind,omitempty"` // foreground or worker
 	Preset         string         `json:"preset,omitempty"`
 	Role           string         `json:"role,omitempty"`
 	Account        string         `json:"account,omitempty"`

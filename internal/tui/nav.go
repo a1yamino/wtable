@@ -1,239 +1,205 @@
 package tui
 
 import (
-	"sort"
+	"fmt"
+	"time"
 
-	"github.com/gdamore/tcell/v3"
+	"wtable/internal/model"
 )
 
-// Arrow-first navigation. Plain keys always belong to the focused pane; the
-// workbench only claims Alt combinations, so nothing an agent's TUI needs is
-// stolen. Ctrl-a stays available as the legacy prefix.
+// One glyph, one meaning. Approval, unread and exit each get their own symbol
+// so no single ⚠ has to carry three jobs.
+const (
+	glyphStarting = "◌"
+	glyphIdle     = "●"
+	glyphRunning  = "◐"
+	glyphApproval = "⏳"
+	glyphQueue    = "⏸"
+	glyphUnread   = "◉"
+	glyphExit     = "✕"
+)
 
-// visibleIDs returns the on-screen panes in reading order (top-left first) so
-// that Alt+1..9 is predictable.
-func (u *ui) visibleIDs() []string {
-	ids := make([]string, 0, len(u.boxes))
-	for id := range u.boxes {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		a, b := u.boxes[ids[i]], u.boxes[ids[j]]
-		if a.y != b.y {
-			return a.y < b.y
-		}
-		if a.x != b.x {
-			return a.x < b.x
-		}
-		return ids[i] < ids[j]
-	})
-	return ids
-}
-
-// paneIndexOf returns the 1-based Alt+N label for a pane, or 0 when hidden.
-func (u *ui) paneIndexOf(id string) int {
-	for i, candidate := range u.visibleIDs() {
-		if candidate == id {
-			return i + 1
-		}
-	}
-	return 0
-}
-
-func (u *ui) navKey(e *tcell.EventKey) bool {
-	if e.Modifiers()&tcell.ModAlt == 0 {
-		return false
-	}
-	if u.zoom {
-		// In single-pane view the only useful moves are leaving it or switching.
-		if e.Str() == "z" {
-			u.toggleZoom()
-			return true
-		}
-	}
-	switch e.Key() {
-	case tcell.KeyLeft:
-		return u.focusDir(-1, 0)
-	case tcell.KeyRight:
-		return u.focusDir(1, 0)
-	case tcell.KeyUp:
-		return u.focusDir(0, -1)
-	case tcell.KeyDown:
-		return u.focusDir(0, 1)
-	}
-	s := e.Str()
-	switch s {
-	case "h":
-		return u.focusDir(-1, 0)
-	case "l":
-		return u.focusDir(1, 0)
-	case "k":
-		return u.focusDir(0, -1)
-	case "j":
-		return u.focusDir(0, 1)
-	case "z":
-		u.toggleZoom()
-		return true
-	}
-	if len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
-		return u.focusNth(int(s[0] - '1'))
-	}
-	return false
-}
-
-func rectCenter(r rect) (int, int) { return r.x + r.w/2, r.y + r.h/2 }
-
-// focusDir moves focus to the nearest pane in the given direction, preferring
-// alignment over raw distance so that a grid behaves like a spreadsheet.
-func (u *ui) focusDir(dx, dy int) bool {
-	p := u.current()
-	if p == nil {
-		return false
-	}
-	cur, ok := u.boxes[p.ID]
-	if !ok {
-		return false
-	}
-	cx, cy := rectCenter(cur)
-	best, bestScore := "", 1<<30
-	for id, r := range u.boxes {
-		if id == p.ID {
-			continue
-		}
-		x, y := rectCenter(r)
-		var primary, perpendicular int
-		if dx != 0 {
-			delta := (x - cx) * dx
-			if delta <= 0 {
-				continue
-			}
-			primary, perpendicular = delta, abs(y-cy)
-		} else {
-			delta := (y - cy) * dy
-			if delta <= 0 {
-				continue
-			}
-			primary, perpendicular = delta, abs(x-cx)
-		}
-		// Two points of progress along the axis are worth one point of drift.
-		if score := primary*2 + perpendicular; score < bestScore {
-			best, bestScore = id, score
-		}
-	}
-	if best == "" {
-		return false
-	}
-	u.jumpTo(best)
-	return true
-}
-
-func (u *ui) focusNth(n int) bool {
-	ids := u.visibleIDs()
-	if n < 0 || n >= len(ids) {
-		return false
-	}
-	if p := u.current(); p != nil && p.ID == ids[n] {
-		return false
-	}
-	u.jumpTo(ids[n])
-	return true
-}
-
-// jumpTo focuses an on-screen pane without changing the layout.
-func (u *ui) jumpTo(id string) {
-	u.focusID(id)
-	if p := u.current(); p != nil {
-		u.offsets[p.ID] = 0
-	}
-	u.copyMode = false
-	u.selection = nil
-	u.resize()
-}
-
-func (u *ui) toggleZoom() {
-	u.zoom = !u.zoom
-	u.tab().zoom = u.zoom
-	u.resize()
-}
-
-// stateGlyph is the one-character status badge shown before a pane name.
-func stateGlyph(state, turnState string, attention []string) string {
+func stateGlyph(state, turnState string) string {
 	switch {
-	case len(attention) > 0:
-		return "⚠"
 	case state == "failed":
-		return "✕"
+		return glyphExit
 	case state == "exited" || state == "interrupted":
-		return "○"
+		return glyphExit
 	case turnState == "running":
-		return "◐"
+		return glyphRunning
 	case state == "running":
-		return "●"
+		return glyphIdle
 	default:
-		return "◌"
+		return glyphStarting
 	}
 }
 
-func stateLabel(state, turnState string) string {
-	if turnState != "" && turnState != "idle" {
-		return state + "/" + turnState
+// railSignal is the one signal a rail row shows: approval > exit > unread > queue.
+func (u *ui) railSignal(p model.Pane) (string, string) {
+	if len(u.permitsFor(p.ID)) > 0 {
+		return glyphApproval, "等待审批"
 	}
-	return state
+	if p.State == "failed" || p.State == "exited" || p.State == "interrupted" {
+		return glyphExit, "已退出"
+	}
+	if p.Unread > 0 {
+		return glyphUnread, "有未读"
+	}
+	if n := len(u.queuedForPane(p.ID)); n > 0 {
+		return glyphQueue, fmt.Sprintf("%d 条排队", n)
+	}
+	switch p.TurnState {
+	case "running":
+		return glyphRunning, "执行中"
+	case "waiting-permission":
+		return glyphApproval, "等待审批"
+	}
+	if p.State == "running" {
+		return glyphIdle, "空闲"
+	}
+	return glyphStarting, "启动中"
 }
 
-// statusHint is the persistent, mode-aware key hint on the right of the bar.
+// stateText is the human word for a pane's state; no protocol names.
+func stateText(p model.Pane) string {
+	if p.TurnState == "running" {
+		return "执行中"
+	}
+	switch p.State {
+	case "running":
+		return "运行中"
+	case "starting":
+		return "启动中"
+	case "failed":
+		return "失败"
+	case "exited":
+		return "已退出"
+	case "interrupted":
+		return "已中断"
+	case "stopping":
+		return "停止中"
+	}
+	return p.State
+}
+
+func relativeAge(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// legendOnce explains a symbol the first time the current session shows it.
+func (u *ui) legendOnce(glyph string) {
+	if u.seenGlyphs == nil {
+		u.seenGlyphs = map[string]bool{}
+	}
+	if u.seenGlyphs[glyph] {
+		return
+	}
+	u.seenGlyphs[glyph] = true
+	switch glyph {
+	case glyphApproval:
+		u.status = "⏳ 等待审批：Ctrl-a p 处理；审批不会抢走键盘，Esc 只收起不会拒绝"
+	case glyphUnread:
+		u.status = "◉ 有未读：打开该 agent 后清除"
+	case glyphExit:
+		u.status = "✕ 已退出：在左栏选择后按 Space 重启或移除"
+	case glyphQueue:
+		u.status = "⏸ 有排队消息：点队列条或 Ctrl-a Space → 队列"
+	}
+}
+
+func (u *ui) queuedTotal() int {
+	count := 0
+	for _, t := range u.snapshot.Tasks {
+		if t.State == "queued" && t.Kind != "chat" {
+			count++
+		}
+	}
+	return count
+}
+
+func (u *ui) approvalCount() int { return len(u.snapshot.Permissions) }
+
+func (u *ui) unreadTotal() int {
+	total := 0
+	for _, p := range u.snapshot.Panes {
+		total += p.Unread
+	}
+	for _, t := range u.snapshot.Tasks {
+		if t.From == "controller" && t.To != "controller" && !t.Seen && (t.State == "completed" || t.State == "failed" || t.State == "unknown") && t.Kind != "chat" {
+			total++
+		}
+	}
+	for _, r := range u.snapshot.Reports {
+		if r.To == "controller" && !r.Seen {
+			total++
+		}
+	}
+	return total
+}
+
+// statusHint is the persistent, context-aware key hint on the right.
 func (u *ui) statusHint() string {
 	switch {
 	case u.prefix:
-		return "Ctrl-a 前缀：a 面板 G 图 t 任务 ? 帮助 d 离开"
-	case u.copyMode:
-		return "回看：↑↓ 滚动 PgUp/PgDn 翻页 y 复制 Esc 返回"
-	case u.picker != nil:
-		return "↑↓ 选择 · Enter 操作 · Esc 返回"
+		return "Ctrl-a：j/k 切 agent · p 审批 · s 工具槽 · a 左栏 · Space 命令"
 	case u.panel != nil:
-		return "↑↓ 选择 · Enter 操作 · Tab 换页 · Esc 返回"
+		return "←→ 侧栏/内容 · ↑↓ 选择 · Enter 操作 · Tab 换页 · Esc 返回"
 	case u.taskView:
-		return "↑↓ 选择 Enter 详情 Esc 返回"
+		return "↑↓ 选择 · Enter 详情 · Esc 返回"
 	case u.graph != nil:
 		return "↑↓ 选择 · Enter 操作 · e 节点/边 · Esc 返回"
-	default:
-		return "Alt+←→ pane · Alt+1..9 直达 · Ctrl-a a 面板 · ? 帮助"
+	case u.palette != nil:
+		return "输入筛选 · ↑↓ 选择 · Enter 执行 · Esc 取消"
+	case u.create != nil:
+		return "↑↓ 选择 · Enter 创建 · Esc 取消"
+	case u.queueView != nil:
+		return "↑↓ 选择 · Enter 提前 · e 编辑 · x 取消 · Esc 返回"
+	case u.area == focusRail:
+		return "↑↓ 选择 · Enter 打开 · Space 动作 · n 新建 · p 工具槽 · x 移除 · Esc 返回"
+	case u.area == focusApproval:
+		return "1..9 选择 · r 拒绝 · d 稍后 · [ ] 切换 · Enter 详情 · Esc 收起"
+	case u.copyMode:
+		return "回看：↑↓ 滚动 PgUp/PgDn 翻页 y 复制 Esc 返回"
 	}
+	if p := u.current(); p != nil && p.Backend == "acp" && u.area == focusMain {
+		return "Enter 发送/排队 · Ctrl-J 换行 · Ctrl-a p 审批 · Ctrl-a Space 命令"
+	}
+	return "直接输入 · Ctrl-a j/k 切换 · Ctrl-a s 工具槽 · Ctrl-a Space 命令"
 }
 
-// queuedTasks counts tasks the scheduler is still holding for one pane.
-func (u *ui) queuedTasks(paneID string) int {
-	count := 0
-	for _, task := range u.snapshot.Tasks {
-		if task.To == paneID && task.State == "queued" {
-			count++
+// leftStatus is the fixed left part of the bar: the only global counters that
+// matter at a glance.
+func (u *ui) leftStatus() string {
+	panes := u.railOrder()
+	index := 0
+	for i, p := range panes {
+		if p.ID == u.canvas.main {
+			index = i + 1
+			break
 		}
 	}
-	return count
-}
-
-// queuedTotal is the queue depth across panes, for the status bar.
-func (u *ui) queuedTotal() int {
-	count := 0
-	for _, task := range u.snapshot.Tasks {
-		if task.State == "queued" {
-			count++
-		}
+	text := fmt.Sprintf("[rail] agent %d/%d", index, len(panes))
+	if n := u.approvalCount(); n > 0 {
+		text += fmt.Sprintf(" · ⏳%d", n)
 	}
-	return count
-}
-
-// blockedDeliveries counts tasks whose write was refused or unconfirmed, so the
-// bar can say "someone is stuck" without opening the task list.
-func (u *ui) blockedDeliveries() int {
-	count := 0
-	for _, task := range u.snapshot.Tasks {
-		if task.DeliveryError == "" {
-			continue
-		}
-		if task.State == "queued" || task.State == "unknown" || task.DeliveryStatus == "write-unconfirmed" {
-			count++
-		}
+	if n := u.unreadTotal(); n > 0 {
+		text += fmt.Sprintf(" · ◉%d", n)
 	}
-	return count
+	return text
 }

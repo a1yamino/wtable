@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v3"
+	"github.com/gdamore/tcell/v3/color"
 	"github.com/rivo/uniseg"
 	"wtable/internal/model"
 )
@@ -150,6 +151,8 @@ func (u *ui) graphEdges() []model.GraphEdge {
 }
 
 func (u *ui) openGraph() {
+	u.panel = nil
+	u.taskView = false
 	u.graph = &graphView{node: "you", follow: true}
 	if p := u.current(); p != nil {
 		u.graph.node = p.ID
@@ -339,7 +342,7 @@ func (u *ui) drawGraph() {
 			return
 		}
 		dashed := e.Kind == "virtual"
-		style := tcell.StyleDefault.Foreground(tcell.ColorGray)
+		style := tcell.StyleDefault.Foreground(color.Gray)
 		if dashed {
 			style = style.Dim(true)
 		} else if v.edges && e.From == v.edge.From && e.To == v.edge.To {

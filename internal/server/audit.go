@@ -3,10 +3,51 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"wtable/internal/model"
 )
+
+// recordDecisionLocked appends one permission outcome to the bounded audit log.
+// decision is derived from the option kind unless an explicit one is supplied.
+func (s *Server) recordDecisionLocked(a *approval, optionID, decision string, batch bool) {
+	kind := ""
+	for _, o := range a.permission.Options {
+		if o.ID == optionID {
+			kind = o.Kind
+			break
+		}
+	}
+	if decision == "" {
+		switch {
+		case optionID == "":
+			decision = "cancel"
+		case strings.HasPrefix(kind, "allow"):
+			decision = "allow"
+		case strings.HasPrefix(kind, "reject"):
+			decision = "deny"
+		default:
+			// Servers are not required to use the allow*/reject* prefixes.
+			// Never claim an approval we cannot prove from the option kind.
+			decision = "unknown"
+		}
+	}
+	entry := model.PermissionAudit{
+		PermissionID: a.permission.ID,
+		PaneID:       a.permission.PaneID,
+		Decision:     decision,
+		OptionID:     optionID,
+		OptionKind:   kind,
+		Title:        cleanInboxText(a.permission.Title, 200),
+		Batch:        batch,
+		At:           time.Now(),
+	}
+	s.state.Decisions = append(s.state.Decisions, entry)
+	if len(s.state.Decisions) > 256 {
+		s.state.Decisions = append([]model.PermissionAudit(nil), s.state.Decisions[len(s.state.Decisions)-256:]...)
+	}
+}
 
 type permissionDenied struct{ message, target string }
 

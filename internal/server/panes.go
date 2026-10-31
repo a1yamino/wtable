@@ -50,6 +50,20 @@ func (s *Server) setCaps(raw json.RawMessage) (model.Pane, error) {
 	return copy, err
 }
 
+// hasForeground reports whether a pane is already marked as the human-facing
+// foreground. except lets a restart validate against everything but itself.
+func (s *Server) hasForeground(except string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Panes {
+		p := &s.state.Panes[i]
+		if p.ID != except && p.Kind == model.PaneForeground {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, error) {
 	var role model.RoleTemplate
 	var snapshotHash string
@@ -71,6 +85,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		p := s.paneLocked(restartID)
 		if p != nil {
 			args.RoleTemplate = p.RoleTemplate
+			args.Kind = p.Kind
 			role.Instructions = p.RoleInstructions
 			snapshotHash = p.RoleHash
 		}
@@ -96,6 +111,38 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 	}
 	if args.Backend != "pty" && args.Backend != "acp" {
 		return model.Pane{}, errors.New("backend 必须为 pty 或 acp")
+	}
+	// The foreground is the one agent a human talks to. It is always a PTY;
+	// ACP has no terminal surface and exists only as a worker backend.
+	if args.Kind != "" && args.Kind != model.PaneForeground && args.Kind != model.PaneWorker {
+		return model.Pane{}, errors.New("kind 必须为 foreground 或 worker")
+	}
+	if args.Kind == "" {
+		switch {
+		case args.Backend == "acp":
+			args.Kind = model.PaneWorker
+		case !s.hasForeground(restartID):
+			args.Kind = model.PaneForeground
+		default:
+			args.Kind = model.PaneWorker
+		}
+	}
+	if args.Kind == model.PaneForeground && args.Backend != "pty" {
+		return model.Pane{}, errors.New("前台 agent 必须是 PTY；ACP 只能创建为 worker")
+	}
+	if args.Kind == model.PaneForeground && restartID == "" {
+		s.mu.Lock()
+		exists := false
+		for i := range s.state.Panes {
+			if s.state.Panes[i].Kind == model.PaneForeground {
+				exists = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if exists {
+			return model.Pane{}, errors.New("已有前台 agent；请先移除它，或把新 pane 创建为 worker")
+		}
 	}
 	if len(args.Command) == 0 {
 		if args.Backend == "acp" {
@@ -168,7 +215,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			targets = append(targets, target.ID)
 		}
 	}
-	candidate := model.Pane{ID: id, Name: args.Name, Backend: args.Backend, Command: args.Command, Cwd: cwd, Preset: args.Preset, Role: args.Role, RoleTemplate: args.RoleTemplate, RoleInstructions: role.Instructions, RoleHash: snapshotHash, Account: args.Account, Endpoint: endpoint, Layer: args.Layer, InjectBrief: args.InjectBrief, LogPath: s.paths.Log, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig}
+	candidate := model.Pane{ID: id, Name: args.Name, Kind: args.Kind, Backend: args.Backend, Command: args.Command, Cwd: cwd, Preset: args.Preset, Role: args.Role, RoleTemplate: args.RoleTemplate, RoleInstructions: role.Instructions, RoleHash: snapshotHash, Account: args.Account, Endpoint: endpoint, Layer: args.Layer, InjectBrief: args.InjectBrief, LogPath: s.paths.Log, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig}
 	brief, briefErr := s.briefTextLocked(candidate, targets)
 	if briefErr != nil {
 		s.mu.Unlock()
@@ -200,6 +247,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		}
 		p.BriefPath = candidate.BriefPath
 		p.Endpoint = endpoint
+		p.Kind = candidate.Kind
 		p.ExitSummary = ""
 		p.LogPath = s.paths.Log
 		p.State = "starting"
@@ -213,6 +261,15 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			s.mu.Unlock()
 			runCancel()
 			return model.Pane{}, errors.New("MVP 最多保留 32 个 pane")
+		}
+		if candidate.Kind == model.PaneForeground {
+			for i := range s.state.Panes {
+				if s.state.Panes[i].Kind == model.PaneForeground {
+					s.mu.Unlock()
+					runCancel()
+					return model.Pane{}, errors.New("已有前台 agent；请先移除它，或把新 pane 创建为 worker")
+				}
+			}
 		}
 		if err = s.writeBrief(&candidate, brief); err != nil {
 			s.mu.Unlock()
@@ -444,6 +501,11 @@ func (s *Server) message(id, runID, role, text string) {
 		p.Messages[n-1].Text += text
 	} else {
 		p.Messages = append(p.Messages, model.Message{Role: role, Text: text, At: time.Now()})
+		// Unread is the human's view: a reply that arrives while another pane is
+		// focused is news; one that arrives in the focused pane is not.
+		if role == "assistant" && s.state.LastFocus != id && p.Unread < 999 {
+			p.Unread++
+		}
 	}
 	// Chat is a bounded presentation log; complete task results live separately.
 	total := 0
@@ -470,6 +532,12 @@ func (s *Server) message(id, runID, role, text string) {
 func (s *Server) permission(ctx context.Context, paneID, runID string, p model.Permission) (string, error) {
 	p.PaneID = paneID
 	p.ID = paneID + ":" + runID[:8] + ":" + p.ID
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now()
+	}
+	if p.ExpiresAt.IsZero() {
+		p.ExpiresAt = p.CreatedAt.Add(10 * time.Minute)
+	}
 	a := &approval{permission: p, answer: make(chan string, 1)}
 	s.mu.Lock()
 	if s.closing || s.runs[paneID] != runID {
@@ -482,9 +550,14 @@ func (s *Server) permission(ctx context.Context, paneID, runID string, p model.P
 	}
 	s.revision.Add(1)
 	s.mu.Unlock()
+	answered := false
 	defer func() {
 		s.mu.Lock()
 		delete(s.approvals, p.ID)
+		if !answered && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			s.recordDecisionLocked(a, "", "expired", false)
+			_ = s.saveLocked()
+		}
 		if pane := s.paneLocked(paneID); pane != nil && s.runs[paneID] == runID && pane.TurnState == "waiting-permission" {
 			pane.TurnState = "running"
 		}
@@ -493,6 +566,7 @@ func (s *Server) permission(ctx context.Context, paneID, runID string, p model.P
 	}()
 	select {
 	case option := <-a.answer:
+		answered = true
 		return option, nil
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -505,6 +579,7 @@ func (s *Server) replyPermission(raw []byte) error {
 	var args struct {
 		ID       string `json:"id"`
 		OptionID string `json:"option_id"`
+		Batch    bool   `json:"batch"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return err
@@ -530,7 +605,8 @@ func (s *Server) replyPermission(raw []byte) error {
 	select {
 	case a.answer <- args.OptionID:
 		delete(s.approvals, args.ID)
-		return nil
+		s.recordDecisionLocked(a, args.OptionID, "", args.Batch)
+		return s.saveLocked()
 	default:
 		return errors.New("审批已经响应")
 	}

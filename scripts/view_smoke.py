@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Real-daemon/TTY acceptance for session-local views; no model calls.
+"""Real-daemon/TTY acceptance for the rail + single-canvas interaction model.
 
 Run after building: python3 scripts/view_smoke.py --binary bin/wtable
+No model calls; peers are local Python fixtures.
 """
 import argparse
 import fcntl
@@ -25,6 +26,7 @@ from smoke import RPC, screen_text, wait_until
 
 def run(args):
     binary = str(Path(args.binary).resolve())
+    script_dir = Path(__file__).resolve().parent
     root = Path(tempfile.mkdtemp(prefix="wt-view-", dir="/tmp"))
     home, tui_home = root / "state", root / "ui"
     home.mkdir(); tui_home.mkdir()
@@ -35,6 +37,10 @@ def run(args):
     connections = []
     log = (root / "daemon.log").open("wb")
     env = dict(os.environ, WTABLE_HOME=str(home), TERM="xterm-256color")
+    (home / "presets.json").write_text(json.dumps([
+        {"id": "acp-fixture", "name": "ACP fixture", "backend": "acp",
+         "command": [sys.executable, str(script_dir / "fixtures/acp_agent.py"), "--root", str(root)]},
+    ]))
 
     def record(name):
         report["checks"].append({"name": name, "passed": True})
@@ -62,21 +68,22 @@ def run(args):
             inbox.touch()
             pane = rpc.call("pane.spawn", {"name": name, "backend": "pty", "cwd": str(root),
                 "delivery_config": {"blocked_regex": "TRUST_THIS_FIXTURE"},
-                "command": [sys.executable, str(Path(__file__).with_name("smoke.py")), "--peer", "--inbox", str(inbox), "--outbox", str(outbox)]})
+                "command": [sys.executable, str(script_dir / "smoke.py"), "--peer", "--inbox", str(inbox), "--outbox", str(outbox)]})
             wait_until(lambda: "PEER_READY" in screen_text(rpc.call("pane.screen", {"id": pane["id"]})), name + " ready")
             peers[name] = pane
         ids = {name: pane["id"] for name, pane in peers.items()}
-        rpc.call("pane.input", {"id": ids["B"], "data": "".join("B_OUTPUT_%02d\r" % i for i in range(35))})
-        wait_until(lambda: "B_OUTPUT_34" in screen_text(rpc.call("pane.screen", {"id": ids["B"]})), "B scrollback output")
 
         def state(**params):
             return rpc.call("state.get", {"frames": False, "graph": True, **params})
 
-        def size(name):
-            frame = rpc.call("pane.screen", {"id": ids[name]})
+        def pane_by_id(pid):
+            return next(p for p in state()["panes"] if p["id"] == pid)
+
+        def size(pid):
+            frame = rpc.call("pane.screen", {"id": pid})
             return frame["cols"], frame["rows"]
 
-        # Observe the actual TUI requests without logging auth or pane payloads.
+        # Observe the TUI's actual requests without logging auth or pane payloads.
         shutil.copyfile(home / "controller.token", tui_home / "controller.token")
         listener = socket.socket(socket.AF_UNIX); listener.bind(str(tui_home / "daemon.sock")); listener.listen()
 
@@ -133,12 +140,6 @@ def run(args):
         def shown(text):
             return text in screen()
 
-        def panel_ready(name="Agents"):
-            def ready():
-                current = screen()
-                return "侧栏/内容" in current and "处理中" not in current and name in current
-            return wait_until(ready, "panel ready " + name)
-
         def send(data):
             os.write(master, data.encode() if isinstance(data, str) else data); time.sleep(.15)
 
@@ -148,148 +149,148 @@ def run(args):
         def screenshot(name):
             save(name + "-screen.txt", screen())
 
-        def visible(names):
-            expected = {ids[name] for name in names}
-            wait_until(lambda: requests and requests[-1].get("frames") is True and set(requests[-1].get("ids", [])) == expected, "visible frames " + names)
+        def visible(*pane_ids):
+            expected = set(pane_ids)
+            wait_until(lambda: requests and requests[-1].get("frames") is True and set(requests[-1].get("ids", [])) == expected, "visible " + str(pane_ids))
 
         def resize(cols, rows):
-            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)); time.sleep(.3)
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)); time.sleep(.4)
 
-        def picker(name, action="f"):
-            prefix(action); wait_until(lambda: shown("选择 pane") or shown("分屏目标"), "pane picker")
-            send(b"\x1b[H" + b"\x1b[B" * "ABC".index(name) + b"\r")
+        def pane_text(pid):
+            return screen_text(rpc.call("pane.screen", {"id": pid}))
 
         wait_until(lambda: shown("PEER_READY"), "initial TUI")
-        visible("A")
-        assert size("B") == size("C") == (80, 24)
+        visible(ids["A"])
+        assert size(ids["B"]) == size(ids["C"]) == (80, 24)
+        assert screen().count("PEER_READY") == 1
         screenshot("single")
-        record("initial_focus_requests_only_visible_pane_frames_and_keeps_background_nominal_size")
+        record("initial_canvas_requests_only_the_main_pane_and_background_keeps_nominal_size")
 
-        picker("B", "|"); visible("AB")
-        a_width, b_width = size("A")[0], size("B")[0]
-        assert 1 < a_width < 120 and 1 < b_width < 120
-        assert size("C") == (80, 24)
-        divider_col = a_width + 1
-        send("\x1b[<0;%d;10M\x1b[<32;%d;10M\x1b[<0;%d;10m" % (divider_col, 81, 81))
-        wait_until(lambda: size("A")[0] >= 78, "drag divider")
-        ratio = size("A")[0] / (size("A")[0] + size("B")[0])
-        resize(140, 40)
-        wait_until(lambda: size("A")[0] + size("B")[0] == 139, "split resizes")
-        assert abs(size("A")[0] / 139 - ratio) < .03
-        assert size("C") == (80, 24)
-        screenshot("split")
-        record("split_chooses_target_drag_preserves_ratio_on_resize_and_background_never_resizes")
+        # Switching agents replaces the canvas; it never creates a split.
+        prefix("j"); visible(ids["B"])
+        wait_until(lambda: state()["last_focus"] == ids["B"], "last focus updated")
+        assert screen().count("PEER_READY") == 1
+        assert size(ids["C"]) == (80, 24)
+        prefix("k"); visible(ids["A"])
+        screenshot("switched")
+        record("rail_navigation_replaces_main_canvas_without_splitting_and_persists_last_focus")
 
-        tab1_sizes = size("A"), size("B")
-        prefix("T"); picker("C"); visible("C")
-        assert shown("tab-2 2/2")
-        prefix(","); send(b"\x15work\r"); wait_until(lambda: shown("work 2/2"), "rename tab")
-        assert size("A") == tab1_sizes[0]
-        prefix("{"); visible("AB")
-        assert (size("A"), size("B")) == tab1_sizes
-        prefix("}"); visible("C")
-        prefix("W"); visible("AB")
-        screenshot("tabs")
-        record("tabs_keep_independent_layouts_focus_and_ratios_and_support_rename_switch_close")
+        # Utility slot: default shell follows the main pane directory, closing
+        # keeps the process alive in the rail, reopening reuses it.
+        before = {p["id"] for p in state()["panes"]}
+        prefix("s")
+        wait_until(lambda: len(state()["panes"]) == len(before) + 1, "utility shell spawned")
+        shell_id = next(p["id"] for p in state()["panes"] if p["id"] not in before)
+        wait_until(lambda: pane_by_id(shell_id)["state"] == "running", "utility shell running")
+        shell = pane_by_id(shell_id)
+        assert shell["cwd"] == peers["A"]["cwd"]
+        visible(ids["A"], shell["id"])
+        shell_size = wait_until(lambda: (size(shell["id"]) if size(shell["id"])[0] > 2 else None), "utility sized")
+        prefix("s"); visible(ids["A"])
+        resize(130, 44)
+        assert size(shell["id"]) == shell_size, "closed utility must keep its size"
+        count = len(state()["panes"])
+        prefix("s")
+        visible(ids["A"], shell["id"])
+        assert len(state()["panes"]) == count, "reopened utility must reuse the existing shell"
+        screenshot("utility")
+        prefix("s"); visible(ids["A"])
+        resize(120, 40)
+        record("utility_slot_spawns_shell_in_main_cwd_keeps_it_running_and_reuses_it")
 
-        prefix("a"); panel_ready("Agents")
-        send(b"\x1b[H\x1b[Bp"); visible("A")
-        frozen_b = size("B")
-        resize(120, 40); assert size("B") == frozen_b
-        send("v"); wait_until(lambda: shown("最近 20 行") and shown("B_OUTPUT_34"), "background peek")
-        assert not shown("B_OUTPUT_00") and size("B") == frozen_b
-        screenshot("peek")
-        send(b"\x1b")  # close the peek overlay
-        send(b"\r"); wait_until(lambda: shown("对 B 做什么"), "pane action list")
-        send(b"\r"); visible("B")  # 打开 is the first entry
-        assert size("B")[0] == 120
-        record("Agents_park_and_scrollback_peek_keep_size_and_Enter_unparks_in_focus")
+        # Rail keyboard focus: End selects the last agent, Enter opens it.
+        prefix("a")
+        wait_until(lambda: shown("需要你") or shown("Workers"), "rail focused")
+        send(b"\x1b[F")
+        send(b"\r")
+        wait_until(lambda: state()["last_focus"] == shell["id"], "rail opened shell")
+        visible(shell["id"])
+        screenshot("rail")
+        record("rail_enter_opens_the_selected_agent_and_clears_keyboard_focus_back_to_canvas")
 
-        prefix("a"); panel_ready("Agents")
-        send(b"\x1b[H\x1b[Bp\x1b"); visible("")
-        frozen_b = size("B"); resize(120, 40)
-        assert size("B") == frozen_b
+        # RPC for the remaining checks; keep the rail order stable by removing
+        # the temporary shell first.
+        rpc.call("pane.remove", {"id": shell["id"]})
+        wait_until(lambda: all(p["id"] != shell["id"] for p in state()["panes"]), "utility shell removed")
+
+        # API validation: foreground is PTY-only and unique; catalog filters.
+        assert all(p["backend"] == "pty" for p in rpc.call("preset.list", {"kind": "foreground"})["presets"])
+        try:
+            rpc.call("pane.spawn", {"name": "bad-acp", "kind": "foreground", "backend": "acp", "cwd": str(root),
+                                    "command": [sys.executable, str(script_dir / "fixtures/acp_agent.py"), "--root", str(root)]})
+            raise AssertionError("foreground ACP was accepted")
+        except Exception as exc:
+            assert "前台" in str(exc), str(exc)
+        try:
+            rpc.call("pane.spawn", {"name": "second-foreground", "kind": "foreground", "backend": "pty", "cwd": str(root), "command": ["/bin/cat"]})
+            raise AssertionError("second foreground was accepted")
+        except Exception as exc:
+            assert "前台" in str(exc), str(exc)
+        record("api_rejects_acp_foreground_and_a_second_foreground_and_filters_presets")
+
+        # Approval is non-blocking: typing in another pane continues, and
+        # Escape on the focused card does not reject.
+        acp = rpc.call("pane.spawn", {"name": "acp", "kind": "worker", "preset": "acp-fixture", "cwd": str(root)})
+        wait_until(lambda: pane_by_id(acp["id"])["state"] == "running", "ACP running")
+        prefix("a"); send(b"\x1b[F"); send(b"\r")
+        wait_until(lambda: state()["last_focus"] == acp["id"], "ACP selected")
+        visible(acp["id"])
+        effect = root / "permission-effect.txt"
+        approval_task = rpc.call("task.send", {"to": acp["id"], "prompt": "permission:" + str(effect)})
+        wait_until(lambda: state()["permissions"], "permission request")
+        wait_until(lambda: shown("请求批准"), "approval card visible")
+        prefix("2"); visible(ids["B"])
+        send("NONBLOCK\r")
+        wait_until(lambda: "NONBLOCK" in pane_text(ids["B"]), "input continues in another pane")
+        assert state()["permissions"] and not effect.exists()
+        send(b"\x1b")  # unfocused Esc must never answer the request
+        time.sleep(.2)
+        assert state()["permissions"] and not effect.exists()
+        prefix("p")
+        wait_until(lambda: shown("1..9 选择"), "approval card focused")
+        send(b"\x1b")
+        time.sleep(.2)
+        assert state()["permissions"] and not effect.exists(), "Esc must only collapse the card"
+        prefix("p"); send("1")  # fixture: option 1 is reject
+        wait_until(lambda: not state()["permissions"], "permission rejected")
+        assert not effect.exists()
+        wait_until(lambda: rpc.call("task.get", {"id": approval_task["id"]})["state"] == "completed", "rejected turn completed")
+        screenshot("approval")
+        record("approval_never_takes_keys_and_escape_collapses_instead_of_rejecting")
+
+        # Inbox: a completed task from the human appears once and disappears
+        # when the target pane is opened.
+        done = rpc.call("task.send", {"to": ids["A"], "prompt": "VIEW_INBOX"})
+        wait_until(lambda: rpc.call("task.get", {"id": done["id"]})["state"] in ("queued", "delivered", "accepted"), "task queued")
+        rpc.call("task.done", {"id": done["id"], "result": "INBOX_RESULT"})
+        wait_until(lambda: any(i.get("task_id") == done["id"] for i in state()["inbox"]), "task inbox item")
+        assert not rpc.call("task.get", {"id": done["id"]})["seen"]
+        prefix("1"); visible(ids["A"])
+        wait_until(lambda: rpc.call("task.get", {"id": done["id"]})["seen"], "task marked seen on open")
+        wait_until(lambda: not any(i.get("task_id") == done["id"] for i in state()["inbox"]), "inbox item cleared on open")
+        record("inbox_lists_completed_human_work_and_clears_only_when_the_pane_is_opened")
+
+        # Narrow terminals compress the rail to a glyph strip; Ctrl-a a expands
+        # it into a drawer, and Esc puts it back.
+        resize(84, 40)
+        wait_until(lambda: not shown("Workers") and not shown("需要你"), "narrow rail strip")
+        screenshot("narrow")
+        prefix("a")
+        wait_until(lambda: shown("需要你") or shown("Workers") or shown("前台"), "rail drawer expanded")
+        send(b"\x1b")
+        wait_until(lambda: not shown("Workers") and not shown("需要你"), "rail drawer collapsed")
+        resize(120, 40)
+        screenshot("wide")
+        record("narrow_terminal_compresses_the_rail_to_a_strip_and_ctrl_a_a_expands_a_drawer")
+
+        # state.get id semantics stay intact.
         blank = state(frames=True, ids=[])
         assert all("frame" not in pane for pane in blank["panes"]), "ids [] must mean metadata only"
         all_frames = state(frames=True)
-        assert all("frame" in pane for pane in all_frames["panes"]), "omitted ids must retain all frames"
-        screenshot("all-parked")
-        before_input = {name: screen_text(rpc.call("pane.screen", {"id": pane_id})) for name, pane_id in ids.items()}
-        send("VIEW_EMPTY_MUST_NOT_REACH_OLD_PANE\r")
-        send(b"\x1b[200~VIEW_EMPTY_PASTE_MUST_NOT_REACH_OLD_PANE\x1b[201~")
-        assert {name: screen_text(rpc.call("pane.screen", {"id": pane_id})) for name, pane_id in ids.items()} == before_input
-        record("all_parked_requests_empty_ids_without_frames_and_omitted_ids_retains_legacy_behavior")
+        assert all("frame" in pane for pane in all_frames["panes"] if pane["backend"] == "pty"), "omitted ids must retain all PTY frames"
+        assert all("frame" not in pane for pane in all_frames["panes"] if pane["backend"] == "acp"), "ACP has no terminal frame"
+        record("state_get_ids_contract_is_unchanged")
 
-        prefix("G"); wait_until(lambda: shown("协作 Graph"), "Graph opens with all parked")
-        wait_until(lambda: requests and requests[-1].get("frames") is False, "Graph metadata-only polling")
-        for _ in range(5):
-            if shown("关联任务 · C ·"):
-                break
-            send("j")
-        assert shown("关联任务 · C ·")
-        send(b"\r"); wait_until(lambda: shown("对 C 做什么"), "graph node action list")
-        send(b"\r"); visible("C")  # 打开 is the first entry
-        assert screen().count("PEER_READY") == 1
-        screenshot("graph-jump")
-        record("Graph_uses_no_frames_and_Enter_unparks_selected_pane_into_focus")
-
-        attention_task = rpc.call("task.send", {"to": ids["A"], "prompt": "VIEW_ATTENTION", "delivery_mode": "claim"})
-        with (root / "A-in").open("a") as commands:
-            commands.write(json.dumps({"id": 1, "method": "task.next", "params": {}}) + "\n")
-        wait_until(lambda: (root / "A-out").exists() and '"id": 1' in (root / "A-out").read_text(), "attention task claimed")
-        with (root / "A-in").open("a") as commands:
-            commands.write(json.dumps({"id": 2, "method": "task.result", "params": {"id": attention_task["id"], "result": "Needs a look"}}) + "\n")
-        wait_until(lambda: rpc.call("task.get", {"id": attention_task["id"]})["state"] == "completed", "attention task completed")
-        wait_until(lambda: shown("1 waiting"), "attention status")
-        prefix("!"); visible("A")
-        wait_until(lambda: next(n for n in state()["graph"]["nodes"] if n["id"] == ids["A"])["unread"] == 0, "visible clears unread")
-        record("attention_status_and_jump_unpark_recipient_and_clear_its_unread")
-        screenshot("attention")
-        picker("B"); send("TRUST_THIS_FIXTURE\r"); picker("A")
-        wait_until(lambda: next(p for p in state()["panes"] if p["id"] == ids["B"])["readiness"] == "blocked", "blocked readiness metadata")
-        wait_until(lambda: shown("1 waiting"), "blocked readiness counted")
-        prefix("!"); visible("B")
-        screenshot("blocked-attention")
-        record("blocked_readiness_counts_as_waiting_and_attention_jump_opens_it")
-
-        prefix("a"); panel_ready("Agents")
-        send("O"); wait_until(lambda: shown("角色模板库"), "role library")
-        send("a"); wait_until(lambda: shown("编辑角色模板"), "role editor")
-        send("view-role\tRole instructions v1\tshell\t\t" + str(root) + "\r")
-        def role():
-            return next((r for r in rpc.call("preset.list")["roles"] if r["name"] == "view-role"), None)
-        wait_until(lambda: role() and role()["instructions"] == "Role instructions v1", "role created")
-        wait_until(lambda: shown("角色模板库") and not shown("处理中"), "role library refreshed")
-        # Enter advances fields; tab to the last one (cwd) so it submits.
-        send("e\t\x15Role instructions v2\t\t\t\r")
-        wait_until(lambda: role() and role()["instructions"] == "Role instructions v2", "role updated")
-        wait_until(lambda: shown("角色模板库") and not shown("处理中"), "updated role library")
-        screenshot("roles")
-        send("d"); wait_until(lambda: shown("y 确认 · n/Esc 取消"), "role delete prompt")
-        send(b"\r"); assert role() is not None
-        send("n"); assert role() is not None
-        send("d"); wait_until(lambda: shown("y 确认 · n/Esc 取消"), "second role delete prompt")
-        send("y"); wait_until(lambda: role() is None, "role deleted")
-        record("Agents_role_library_creates_edits_and_requires_explicit_confirmation_to_delete")
-        send(b"\x1b"); send(b"\x1b")
-        acp = rpc.call("pane.spawn", {"name": "acp-draft", "backend": "acp", "cwd": str(root),
-            "command": [sys.executable, str(Path(__file__).parent / "fixtures/acp_agent.py"), "--root", str(root)]})
-        prefix("f"); wait_until(lambda: shown("选择 pane"), "ACP picker")
-        send(b"\x1b[F\r")
-        wait_until(lambda: shown("ACP 输入") and requests and set(requests[-1].get("ids", [])) == {acp["id"]}, "ACP is sole visible pane")
-        prefix("a"); panel_ready("Agents")
-        send(b"\x1b[Fp"); send(b"\x1b"); visible("")
-        marker = "VIEW_HIDDEN_ACP_DRAFT_MUST_STAY_EMPTY"
-        send("\x1b[200~" + marker + "\x1b[201~")
-        prefix("a"); panel_ready("Agents")
-        send(b"\x1b[F\r"); wait_until(lambda: shown("对 acp-draft 做什么"), "ACP pane action list")
-        send(b"\r"); wait_until(lambda: shown("ACP 输入"), "ACP reopened")
-        assert marker not in screen(), "paste into an empty view changed a hidden ACP draft"
-        task_count = len(rpc.call("task.list"))
-        send(b"\r")
-        assert len(rpc.call("task.list")) == task_count, "reopened ACP draft must remain empty"
-        screenshot("empty-acp-draft")
-        record("parking_only_visible_ACP_ignores_empty_view_paste_and_reopens_with_empty_draft")
         save("requests.json", json.dumps(requests, ensure_ascii=False, indent=2) + "\n")
         save("final-state.json", json.dumps(state(), ensure_ascii=False, indent=2) + "\n")
         prefix("d"); assert tui.wait(timeout=5) == 0

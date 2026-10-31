@@ -25,7 +25,15 @@ func shortTask(id string) string {
 	return strings.TrimPrefix(id, "t-")[:min(6, len(strings.TrimPrefix(id, "t-")))]
 }
 func (u *ui) orderedTasks() []model.Task {
-	tasks := append([]model.Task{}, u.snapshot.Tasks...)
+	tasks := []model.Task{}
+	for _, t := range u.snapshot.Tasks {
+		// Chat turns belong to each agent's conversation view; the delegation
+		// task list stays readable unless the human explicitly asks for them.
+		if t.Kind == "chat" && !u.allowChat {
+			continue
+		}
+		tasks = append(tasks, t)
+	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
 			return tasks[i].ID < tasks[j].ID

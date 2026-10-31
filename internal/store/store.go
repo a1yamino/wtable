@@ -10,13 +10,16 @@ import (
 )
 
 type State struct {
-	Denied  []model.DeniedEvent `json:"denied,omitempty"`
-	Reports []model.Report      `json:"reports"`
-	Version int                 `json:"version"`
-	Panes   []model.Pane        `json:"panes"`
-	Tasks   []model.Task        `json:"tasks"`
-	Edges   []model.Edge        `json:"edges"`
-	Layers  []model.Layer       `json:"layers"`
+	Denied       []model.DeniedEvent     `json:"denied,omitempty"`
+	Reports      []model.Report          `json:"reports"`
+	Decisions    []model.PermissionAudit `json:"permission_decisions,omitempty"`
+	Version      int                     `json:"version"`
+	LastFocus    string                  `json:"last_focus,omitempty"`
+	Panes        []model.Pane            `json:"panes"`
+	Tasks        []model.Task            `json:"tasks"`
+	Edges        []model.Edge            `json:"edges"`
+	Layers       []model.Layer           `json:"layers"`
+	KindMigrated bool                    `json:"kind_migrated,omitempty"`
 }
 
 type Store struct{ db *sql.DB }

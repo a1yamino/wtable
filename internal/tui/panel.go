@@ -185,7 +185,7 @@ func (u *ui) panelFinished(r panelResult) {
 		for i, p := range u.snapshot.Panes {
 			if p.ID == pane.ID {
 				u.focus = i
-				u.openPane(pane.ID, true)
+				u.selectMain(pane.ID)
 				r.owner.selected = i
 				break
 			}
@@ -194,7 +194,7 @@ func (u *ui) panelFinished(r panelResult) {
 		if r.owner.fastCreate {
 			r.owner.fastCreate = false
 			u.panel = nil
-			u.status = "已创建 " + pane.Name + "（Alt+数字 直达，Ctrl-a a 可再调）"
+			u.status = "已创建 " + pane.Name + "（Ctrl-a 1..9 直达，Ctrl-a a 左栏）"
 		} else {
 			u.status = "已保存 Agent：" + pane.Name
 		}
@@ -527,9 +527,9 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 		switch {
 		case e.Key() == tcell.KeyEnter:
 			u.panel = nil
-			u.openPane(pane.ID, true)
+			u.selectMain(pane.ID)
 		case e.Str() == "p":
-			u.togglePark(pane.ID)
+			u.putUtility(pane.ID)
 		case e.Str() == "O":
 			p.roleView = true
 			p.selected = 0
@@ -556,7 +556,7 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 				_, _ = u.refresh()
 			}
 		case e.Str() == "R":
-			u.focus = p.selected
+			u.selectMain(pane.ID)
 			u.restartCurrent()
 		case e.Str() == "l":
 			p.preview = "日志：" + pane.LogPath + "\n\n" + pane.Error + "\n" + pane.ExitSummary
@@ -828,7 +828,6 @@ func (u *ui) submitPanelForm() {
 			count++
 		}
 		p.form = ""
-		u.tasks = true
 		_, _ = u.refresh()
 		u.resize()
 		u.status = fmt.Sprintf("已发送 %d 条任务", count)

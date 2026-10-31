@@ -90,10 +90,33 @@ func (s *Server) configuredPresets() ([]model.Preset, error) {
 	return presets, nil
 }
 
-func (s *Server) catalog() (model.Catalog, error) {
+func (s *Server) catalog(input ...json.RawMessage) (model.Catalog, error) {
+	var args struct {
+		Kind string `json:"kind"`
+	}
+	var raw json.RawMessage
+	if len(input) > 0 {
+		raw = input[0]
+	}
+	if len(raw) > 0 {
+		_ = decode(raw, &args)
+	}
+	if args.Kind != "" && args.Kind != model.PaneForeground && args.Kind != model.PaneWorker {
+		return model.Catalog{}, errors.New("kind 必须为 foreground 或 worker")
+	}
 	presets, err := s.configuredPresets()
 	if err != nil {
 		return model.Catalog{}, err
+	}
+	if args.Kind == model.PaneForeground {
+		// Foreground panes are PTY-only; ACP is a worker backend.
+		filtered := presets[:0]
+		for _, p := range presets {
+			if p.Backend == "pty" {
+				filtered = append(filtered, p)
+			}
+		}
+		presets = filtered
 	}
 	profiles, err := s.accountProfiles()
 	if err != nil {
