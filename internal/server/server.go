@@ -55,6 +55,7 @@ type Server struct {
 	catalogAt         time.Time
 	catalogVersions   map[string]string
 	diagnosticSecrets map[string][]string
+	pumpMu            sync.Mutex
 	pumps             map[string]*pumpState
 	nextWaiters       map[string]chan struct{}
 	taskWaiters       map[string]chan struct{}

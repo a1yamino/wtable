@@ -15,12 +15,14 @@ type pumpState struct {
 }
 
 // wake asks the pump for one pane to look at its queue. It never blocks and
-// never writes by itself, so callers may hold no lock beyond s.mu.
+// never writes by itself. Pump state carries its own lock so callers may wake
+// while holding s.mu — report completion does exactly that — and the reverse
+// order never occurs, which is what keeps that path from deadlocking.
 func (s *Server) wake(paneID string) {
 	if paneID == "" {
 		return
 	}
-	s.mu.Lock()
+	s.pumpMu.Lock()
 	if s.pumps == nil {
 		s.pumps = map[string]*pumpState{}
 	}
@@ -31,26 +33,28 @@ func (s *Server) wake(paneID string) {
 	}
 	if st.running {
 		st.pending = true
-		s.mu.Unlock()
+		s.pumpMu.Unlock()
 		return
 	}
 	st.running = true
-	s.mu.Unlock()
+	s.pumpMu.Unlock()
 	go s.pumpLoop(paneID, st)
 }
 
 func (s *Server) pumpLoop(paneID string, st *pumpState) {
 	for {
 		s.pumpStep(paneID)
-		s.mu.Lock()
-		again := st.pending && !s.closing && s.ctx.Err() == nil
+		s.pumpMu.Lock()
+		// s.closing is intentionally not read here: it is guarded by s.mu, and
+		// pumpStep re-checks it under that lock before touching any state.
+		again := st.pending && s.ctx.Err() == nil
 		if again {
 			st.pending = false
-			s.mu.Unlock()
+			s.pumpMu.Unlock()
 			continue
 		}
 		st.running = false
-		s.mu.Unlock()
+		s.pumpMu.Unlock()
 		return
 	}
 }

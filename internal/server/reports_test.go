@@ -121,6 +121,32 @@ func TestLegacyFinalReportDoesNotRepeatHandoff(t *testing.T) {
 	}
 }
 
+// A handoff whose report target is an ACP pane wakes that pane's pump while
+// the state lock is still held by task completion. This used to deadlock the
+// whole daemon, before the pump got its own lock.
+func TestHandoffToACPTargetWakesWithoutDeadlock(t *testing.T) {
+	s := taskTestServer(t)
+	s.state.Panes = []model.Pane{{ID: "worker", Backend: "pty", State: "running"}, {ID: "inbox", Backend: "acp", State: "running"}}
+	s.state.Edges = []model.Edge{{From: "sender", To: "inbox"}}
+	s.state.Tasks = []model.Task{{ID: "parent", From: "sender", Origin: "sender", To: "worker", Prompt: "work", State: "delivered", DeliveryMode: "inject", OnComplete: "handoff", ReportTo: "inbox"}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.taskResult("worker", rawTask(map[string]string{"id": "parent", "result": "done"}))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handoff to an ACP report target deadlocked the daemon")
+	}
+	if len(s.state.Tasks) != 2 || s.state.Tasks[1].To != "inbox" || s.state.Tasks[1].DeliveryMode != "prompt" {
+		t.Fatalf("handoff child not queued for prompt delivery: %+v", s.state.Tasks)
+	}
+}
+
 func TestReportVisibilityAfterGrantRevocation(t *testing.T) {
 	for _, revoke := range []bool{false, true} {
 		name := "delivered"
