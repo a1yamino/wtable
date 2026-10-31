@@ -215,7 +215,7 @@ Delivery defaults follow the target's capabilities: ACP targets use `prompt`, PT
 ./bin/wtable send --queue coder 'Deliver once the gate allows it'
 ```
 
-Steering is accepted only when the target is currently executing a turn and declares `push_steer`. Sending it to an idle pane is rejected rather than queued; if the turn ends before delivery, a queued steer is downgraded to ordinary `push` so it cannot be injected into a later, unrelated turn.
+Steering is accepted only when the target is currently executing a turn and declares `push_steer`. A pane waiting for permission is not considered free for steering. Sending to an idle pane is rejected rather than queued; if the turn ends before delivery, a queued steer is downgraded to ordinary `push` so it cannot be injected into a later, unrelated turn.
 
 Injection checks process liveness, blocked text, output settling, and previous unfinished injection. Defaults are 400ms settling, 3s verification, and 90s ACK timeout. Direct `codex`, `claude`, and `agy` commands use built-in blocked-text patterns. `gemini`, `opencode`, `grok`, and other programs or wrappers require explicit configuration; they are not validated built-in adapters:
 

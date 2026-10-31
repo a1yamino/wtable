@@ -174,6 +174,25 @@ func TestPeerBlockedReasonIsSanitizedEndToEnd(t *testing.T) {
 	}
 }
 
+func TestReportDoesNotLeakBlockedLine(t *testing.T) {
+	s := taskTestServer(t)
+	s.state.Panes = []model.Pane{{ID: "target", Backend: "pty", State: "running"}, {ID: "inbox", State: "running"}}
+	s.state.Tasks = []model.Task{{ID: "task", From: "controller", To: "target", ReportTo: "inbox", OnComplete: "notify", State: "cancelled", DeliveryError: "blocked:secret target screen"}}
+	s.mu.Lock()
+	s.completeReportLocked(&s.state.Tasks[0])
+	reports := append([]model.Report(nil), s.state.Reports...)
+	s.mu.Unlock()
+	if len(reports) != 1 {
+		t.Fatalf("missing report: %+v", reports)
+	}
+	if strings.Contains(reports[0].Summary, "secret target screen") {
+		t.Fatalf("report leaked the target's blocked line: %q", reports[0].Summary)
+	}
+	if !strings.Contains(reports[0].Summary, "blocked:") {
+		t.Fatalf("report lost the blocked category: %q", reports[0].Summary)
+	}
+}
+
 func TestSnapshotTruncatesReportSummary(t *testing.T) {
 	s := taskTestServer(t)
 	long := strings.Repeat("x", 2000)

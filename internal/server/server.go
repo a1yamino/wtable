@@ -333,6 +333,9 @@ func (s *Server) saveLocked() error {
 	// A full successful save makes the durable copy match memory again, so a
 	// transient error no longer needs to keep the daemon in fail-closed mode.
 	s.storeErr = nil
+	// The same save also persisted whatever chat was dirty at marshal time.
+	s.chatDirty = false
+	s.chatSavedAt = time.Now()
 	return nil
 }
 

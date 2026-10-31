@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v3"
 	"wtable/internal/model"
@@ -213,7 +214,8 @@ func (u *ui) restartCurrent() {
 		return
 	}
 	var result model.Pane
-	if u.call("pane.restart", map[string]string{"id": p.ID}, &result) {
+	// An ACP restart can spend up to 30s in initialize/session-load.
+	if u.callWithin(45*time.Second, "pane.restart", map[string]string{"id": p.ID}, &result) {
 		delete(u.sizes, p.ID)
 		u.offsets[p.ID] = 0
 		u.copyMode = false

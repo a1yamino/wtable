@@ -314,7 +314,7 @@ func run(args []string) error {
 		onComplete := fs.String("on-complete", "", "none、notify 或 handoff")
 		reportTo := fs.String("report-to", "", "结果回传目标 pane")
 		parentTask := fs.String("parent", "", "关联的父任务 ID")
-		timeout := fs.Duration("timeout", 10*time.Minute, "等待时限")
+		timeout := fs.Duration("timeout", 10*time.Minute, "ask 的等待时限；0 表示立即超时")
 		if err = fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -412,7 +412,7 @@ func run(args []string) error {
 	case "wait":
 		fs := flag.NewFlagSet("wait", flag.ContinueOnError)
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
-		timeout := fs.Duration("timeout", 10*time.Minute, "等待时限")
+		timeout := fs.Duration("timeout", 10*time.Minute, "等待时限；0 使用 daemon 默认 60s")
 		if err = fs.Parse(args[1:]); err != nil {
 			return err
 		}

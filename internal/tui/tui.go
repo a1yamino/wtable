@@ -3,6 +3,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gdamore/tcell/v3"
 
+	"wtable/internal/config"
 	"wtable/internal/model"
 	"wtable/internal/rpc"
 )
@@ -65,6 +67,8 @@ type ui struct {
 	viewIndex, nextTab                  int
 	parked                              map[string]bool
 	picker                              *panePicker
+	refreshFailed                       bool
+	lastReconnect                       time.Time
 }
 
 // Run attaches the control UI. Leaving the UI detaches; daemon panes keep running.
@@ -72,11 +76,6 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 	if err := client.Call(ctx, "ui.attach", struct{}{}, nil); err != nil {
 		return err
 	}
-	defer func() {
-		detachCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = client.Call(detachCtx, "ui.detach", struct{}{}, nil)
-	}()
 	// Agent output, task results and report summaries are untrusted. tcell
 	// sanitises control characters from Put/PutStr when this option is set;
 	// leaving it off lets a trailing ESC/CR reach the outer terminal.
@@ -91,6 +90,14 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 	screen.EnablePaste()
 	screen.EnableMouse(tcell.MouseDragEvents)
 	u := &ui{ctx: ctx, client: client, screen: screen, cwd: cwd, offsets: map[string]int{}, sizes: map[string][2]int{}, boxes: map[string]rect{}}
+	defer func() {
+		if u.client == nil {
+			return
+		}
+		detachCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = u.client.Call(detachCtx, "ui.detach", struct{}{}, nil)
+	}()
 	if _, err = u.refresh(); err != nil {
 		return err
 	}
@@ -147,12 +154,36 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 		case <-ticker.C:
 			changed, err := u.refresh()
 			if err != nil {
-				// A transient daemon stall (large state, slow disk) must not
-				// tear down the local UI. Keep the last frame and show why it
-				// stopped refreshing; the next tick retries.
+				u.refreshFailed = true
 				u.status = "刷新失败：" + err.Error()
-				u.draw()
-				continue
+				// A server error leaves the stream synchronized: retry on the
+				// same connection. A transport error poisons bufio.Scanner, so
+				// the only recovery is a fresh connection.
+				if !isServerResponseError(err) {
+					if time.Since(u.lastReconnect) < 2*time.Second {
+						u.draw()
+						continue
+					}
+					u.lastReconnect = time.Now()
+					if rerr := u.reconnect(); rerr != nil {
+						u.status = "刷新失败：" + err.Error() + "；重连失败：" + rerr.Error()
+						u.draw()
+						continue
+					}
+					changed, err = u.refresh()
+					if err != nil {
+						u.status = "刷新失败：" + err.Error()
+						u.draw()
+						continue
+					}
+				} else {
+					u.draw()
+					continue
+				}
+			}
+			if u.refreshFailed {
+				u.refreshFailed = false
+				u.status = ""
 			}
 			if changed {
 				u.resize()
@@ -162,8 +193,58 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 	}
 }
 
+// A server response (even an error) leaves the JSON-RPC stream synchronized.
+// Anything else (deadline, EOF, decode failure) latches the scanner's error,
+// so retrying the same connection cannot recover.
+func isServerResponseError(err error) bool {
+	var rpcErr *rpc.Error
+	return errors.As(err, &rpcErr)
+}
+
+// reconnect replaces the long-lived control connection. The old socket is
+// closed first; ui.attach is retried briefly because the daemon may not have
+// processed that close and released the single-writer slot yet.
+func (u *ui) reconnect() error {
+	if u.client != nil {
+		_ = u.client.Close()
+	}
+	paths, err := config.Resolve()
+	if err != nil {
+		return err
+	}
+	token, err := paths.ClientToken()
+	if err != nil {
+		return err
+	}
+	dialCtx, cancel := context.WithTimeout(u.ctx, 2*time.Second)
+	defer cancel()
+	next, err := rpc.Dial(dialCtx, paths.Socket, token)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		attachCtx, attachCancel := context.WithTimeout(u.ctx, time.Second)
+		err = next.Call(attachCtx, "ui.attach", struct{}{}, nil)
+		attachCancel()
+		if err == nil {
+			u.client = next
+			return nil
+		}
+		if time.Now().After(deadline) || !strings.Contains(err.Error(), "已有可写 TUI") {
+			_ = next.Close()
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func (u *ui) call(method string, args, out any) bool {
-	ctx, cancel := context.WithTimeout(u.ctx, 3*time.Second)
+	return u.callWithin(3*time.Second, method, args, out)
+}
+
+func (u *ui) callWithin(timeout time.Duration, method string, args, out any) bool {
+	ctx, cancel := context.WithTimeout(u.ctx, timeout)
 	defer cancel()
 	if err := u.client.Call(ctx, method, args, out); err != nil {
 		u.status = err.Error()

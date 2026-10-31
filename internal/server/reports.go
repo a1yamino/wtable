@@ -57,7 +57,10 @@ func (s *Server) completeReportLocked(t *model.Task) {
 			summary += "\n" + t.Result
 		}
 		if t.DeliveryError != "" {
-			summary += "\n" + t.DeliveryError
+			// Reports can be addressed to a different pane than the target.
+			// Never carry the target's matched screen line across that boundary,
+			// even when the task was sent by the controller.
+			summary += "\n" + sanitizedBlockedText(t.DeliveryError)
 		}
 	}
 	r.Summary = reportSummary(summary)

@@ -225,7 +225,7 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 ./bin/wtable send --queue coder '闸门允许后再发送'
 ```
 
-Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；发给空闲目标会直接报错而不是排队。若 turn 在投递前结束，已排队的 steer 会降级为普通 `push`，避免被插进之后一个无关的 turn。
+Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等待权限确认的 pane 不接受 steer。发给空闲目标会直接报错而不是排队。若 turn 在投递前结束，已排队的 steer 会降级为普通 `push`，避免被插进之后一个无关的 turn。
 
 注入前会检查进程、阻塞文案、输出稳定时间和未结束的前一条注入任务。默认稳定窗口为 400ms，写后验证为 3s，ACK 超时为 90s。直接启动 `codex`、`claude`、`agy` 时使用内置阻塞文案；`gemini`、`opencode`、`grok` 和其他程序或包装脚本需要自行配置，暂不属于已验证的内置适配：
 

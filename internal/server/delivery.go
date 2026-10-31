@@ -21,10 +21,17 @@ func activeState(state string) bool {
 // sanitizedDeliveryReason keeps target-screen content out of peer-visible
 // task fields. The controller may still see the matched line (already
 // redacted by readyLocked) for diagnosis; a linked peer gets a category only.
+func sanitizedBlockedText(msg string) string {
+	if strings.HasPrefix(msg, "blocked:") {
+		return "blocked: 目标终端命中了阻塞规则；详细屏幕内容仅控制端可见"
+	}
+	return msg
+}
+
 func sanitizedDeliveryReason(err error, from string) string {
 	msg := err.Error()
-	if from != "controller" && strings.HasPrefix(msg, "blocked:") {
-		return "blocked: 目标终端命中了阻塞规则；详细屏幕内容仅控制端可见"
+	if from != "controller" {
+		return sanitizedBlockedText(msg)
 	}
 	return msg
 }
