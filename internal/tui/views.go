@@ -299,7 +299,7 @@ func (u *ui) permitsFor(paneID string) []model.Permission {
 func (u *ui) queuedForPane(paneID string) []model.Task {
 	tasks := []model.Task{}
 	for _, t := range u.snapshot.Tasks {
-		if t.To == paneID && t.State == "queued" {
+		if t.Kind != model.TaskKindBrief && t.To == paneID && t.State == "queued" {
 			tasks = append(tasks, t)
 		}
 	}
@@ -322,7 +322,7 @@ func (u *ui) markFocusedSeen(id string) {
 	needsFocus := u.lastFocusSent != id
 	if !needsFocus {
 		for _, t := range u.snapshot.Tasks {
-			if t.To == id && !t.Seen && (t.State == "completed" || t.State == "failed" || t.State == "unknown") {
+			if t.Kind != model.TaskKindBrief && t.To == id && !t.Seen && (t.State == "completed" || t.State == "failed" || t.State == "unknown") {
 				needsFocus = true
 				break
 			}
@@ -349,7 +349,7 @@ func (u *ui) markFocusedSeen(id string) {
 	// list and stalls input on a large backlog.
 	for i := range u.snapshot.Tasks {
 		t := &u.snapshot.Tasks[i]
-		if t.To == id && (t.State == "completed" || t.State == "failed" || t.State == "unknown") {
+		if t.Kind != model.TaskKindBrief && t.To == id && (t.State == "completed" || t.State == "failed" || t.State == "unknown") {
 			t.Seen = true
 		}
 	}

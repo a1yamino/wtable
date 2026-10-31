@@ -27,6 +27,9 @@ func (u *ui) paneBusyForTask(id string) bool {
 		return true
 	}
 	for _, t := range u.snapshot.Tasks {
+		if t.Kind == model.TaskKindBrief {
+			continue
+		}
 		if t.To == id && (t.State == "delivered" || t.State == "accepted" || t.State == "running" || t.State == "cancelling") {
 			return true
 		}

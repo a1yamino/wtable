@@ -168,6 +168,11 @@ func (s *Server) readyLocked(p *model.Pane, allowBusy bool) error {
 	}
 	if !allowBusy {
 		for _, t := range s.state.Tasks {
+			// A delivered brief is instructions the agent may already be
+			// reading. It must not hold the gate against the first real task.
+			if t.Kind == model.TaskKindBrief {
+				continue
+			}
 			if t.To == p.ID && (taskMode(t) == "push" || taskMode(t) == "steer") && activeState(t.State) {
 				return fmt.Errorf("busy:%s", t.ID)
 			}
@@ -196,6 +201,9 @@ func taskText(s string) string {
 	}, s)
 }
 func taskEnvelope(t model.Task) string {
+	if t.Kind == model.TaskKindBrief {
+		return fmt.Sprintf("[WTABLE BRIEF %s]\n%s\n[WTABLE BRIEF END %s]\nThis is standing instructions, not a delegated task. Do not ack or result it.\nDo not print credentials.\n", t.ID, taskText(t.Prompt), t.ID)
+	}
 	return fmt.Sprintf("[WTABLE TASK %s]\n%s\n[WTABLE END %s]\nAccept this task with: \"$WTABLE_CLI\" ack %s\nWhen finished, submit the full result with: \"$WTABLE_CLI\" result %s <result>\nDo not print credentials.\n", t.ID, taskText(t.Prompt), t.ID, t.ID, t.ID)
 }
 
@@ -224,11 +232,15 @@ func deliveryPayload(t model.Task, mode, active string, bracketed bool) (envelop
 	default:
 		// One physical line is one submission. JSON retains prompt newlines without
 		// turning each envelope instruction into a separate terminal command.
+		instructions := fmt.Sprintf("Accept with \"$WTABLE_CLI\" ack %s; finish with \"$WTABLE_CLI\" result %s <result>. Do not print credentials.", t.ID, t.ID)
+		if t.Kind == model.TaskKindBrief {
+			instructions = "This is standing instructions, not a delegated task. Do not ack or result it. Do not print credentials."
+		}
 		payload, _ := json.Marshal(struct {
 			TaskID       string `json:"task_id"`
 			Prompt       string `json:"prompt"`
 			Instructions string `json:"instructions"`
-		}{t.ID, taskText(t.Prompt), fmt.Sprintf("Accept with \"$WTABLE_CLI\" ack %s; finish with \"$WTABLE_CLI\" result %s <result>. Do not print credentials.", t.ID, t.ID)})
+		}{t.ID, taskText(t.Prompt), instructions})
 		envelope = string(payload)
 		data = envelope + "\r"
 	}
@@ -441,7 +453,9 @@ func (s *Server) deliveryLoop() {
 			if t.State == "queued" && (taskMode(*t) == "push" || taskMode(*t) == "steer" || taskMode(*t) == "prompt") {
 				wakePanes = append(wakePanes, t.To)
 			}
-			if t.State == "delivered" && (taskMode(*t) == "push" || taskMode(*t) == "steer") && t.DeliveredAt != nil {
+			// A brief has no acknowledgement step: its delivery is the outcome,
+			// so an absent ack must not turn it into unknown.
+			if t.Kind != model.TaskKindBrief && t.State == "delivered" && (taskMode(*t) == "push" || taskMode(*t) == "steer") && t.DeliveredAt != nil {
 				p := s.paneLocked(t.To)
 				if p != nil && time.Since(*t.DeliveredAt) >= time.Duration(deliveryConfig(p).AckTimeoutMS)*time.Millisecond {
 					if taskMode(*t) == "steer" && t.SteerOf == "" {

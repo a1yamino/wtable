@@ -144,7 +144,9 @@ func deriveInbox(s model.Snapshot) []model.InboxItem {
 	}
 	seenTask := map[string]bool{}
 	for _, t := range s.Tasks {
-		if t.Kind == "chat" {
+		// Chat and briefs are not delegated work: they never ask the human to
+		// act or report back.
+		if t.Kind == model.TaskKindChat || t.Kind == model.TaskKindBrief {
 			continue
 		}
 		blocked := t.DeliveryError != "" && (t.State == "queued" || t.State == "unknown" || t.DeliveryStatus == "write-unconfirmed")

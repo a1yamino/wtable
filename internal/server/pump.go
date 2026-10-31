@@ -76,6 +76,10 @@ func (s *Server) pumpStep(paneID string) {
 	activeID := ""
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
+		// Instructions do not reserve the pane's work slot.
+		if t.Kind == model.TaskKindBrief {
+			continue
+		}
 		if t.To == paneID && activeState(t.State) {
 			activeID = t.ID
 			break
@@ -185,6 +189,9 @@ func (s *Server) paneBusyLocked(paneID string) bool {
 	}
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
+		if t.Kind == model.TaskKindBrief {
+			continue
+		}
 		if t.To == paneID && (taskMode(*t) == "push" || taskMode(*t) == "steer") && activeState(t.State) {
 			return true
 		}

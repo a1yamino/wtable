@@ -173,12 +173,22 @@ type GraphEdge struct {
 	Active int    `json:"active"`
 }
 
+// Task kinds separate conversation and onboarding instructions from delegated
+// work. A brief is standing instructions, so it never counts as busy, unread or
+// a completion notice.
+const (
+	TaskKindChat       = "chat"
+	TaskKindDelegation = "delegation"
+	TaskKindHandoff    = "handoff"
+	TaskKindBrief      = "brief"
+)
+
 type Task struct {
 	ID             string     `json:"id"`
 	From           string     `json:"from"`
 	To             string     `json:"to"`
 	Prompt         string     `json:"prompt"`
-	Kind           string     `json:"kind,omitempty"` // chat, delegation, handoff
+	Kind           string     `json:"kind,omitempty"` // chat, delegation, handoff, brief
 	State          string     `json:"state"`          // queued, delivered, accepted, completed, failed, unknown, cancelling, cancelled
 	DeliveryMode   string     `json:"delivery_mode,omitempty"`
 	DeliveryStatus string     `json:"delivery_status,omitempty"`

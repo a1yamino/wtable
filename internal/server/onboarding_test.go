@@ -379,3 +379,71 @@ func TestRoleSnapshotSurvivesTemplateUpdatesAndBriefReads(t *testing.T) {
 		t.Fatal("role path traversal accepted")
 	}
 }
+
+func TestBriefIsInstructionsNotDelegatedWork(t *testing.T) {
+	s := onboardingServer(t)
+	s.state.Panes = []model.Pane{{ID: "worker", Name: "Worker", Kind: model.PaneWorker, Backend: "pty", State: "running", Cwd: "/tmp"}}
+	s.mu.Lock()
+	brief, err := s.enqueueBriefLocked(&s.state.Panes[0], "# Worktable brief\nInstructions")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.Kind != model.TaskKindBrief || brief.OnComplete != "none" || brief.ReportTo != "" {
+		t.Fatalf("brief carries delegation semantics: %+v", brief)
+	}
+	listed, err := s.getTasks("controller", "task.list", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tasks := listed.([]model.Task); len(tasks) != 0 {
+		t.Fatalf("brief leaked into task.list: %+v", tasks)
+	}
+	if detail, err := s.getTasks("controller", "task.get", rawTask(map[string]string{"id": brief.ID})); err != nil {
+		t.Fatalf("task.get must still return a brief by ID: %v", err)
+	} else if detail.(model.Task).Kind != model.TaskKindBrief {
+		t.Fatalf("task.get lost the brief kind: %+v", detail)
+	}
+	envelope := taskEnvelope(brief)
+	if strings.Contains(envelope, "\"$WTABLE_CLI\" ack") || strings.Contains(envelope, "\"$WTABLE_CLI\" result") || !strings.Contains(envelope, "standing instructions") {
+		t.Fatalf("brief envelope asks for a receipt: %s", envelope)
+	}
+
+	s.mu.Lock()
+	s.state.Tasks[0].State = "delivered"
+	s.mu.Unlock()
+	if s.paneBusyLocked("worker") {
+		t.Fatal("a delivered brief keeps the pane busy")
+	}
+	s.mu.Lock()
+	s.state.Tasks[0].Kind = model.TaskKindDelegation
+	s.mu.Unlock()
+	if !s.paneBusyLocked("worker") {
+		t.Fatal("delivered work must still keep the pane busy")
+	}
+
+	s.mu.Lock()
+	s.state.Tasks[0].Kind = model.TaskKindBrief
+	s.state.Tasks[0].State = "completed"
+	s.state.Tasks[0].Seen = false
+	s.state.Panes = append(s.state.Panes, model.Pane{ID: "sender", Name: "Sender", Backend: "pty", State: "running"})
+	s.state.Edges = append(s.state.Edges, model.Edge{From: "sender", To: "worker"})
+	if _, err := s.createTaskLocked("sender", model.SendParams{To: "worker", Prompt: "work", Kind: model.TaskKindBrief}, ""); err == nil {
+		t.Fatal("a peer was allowed to label work as a brief")
+	}
+	snapshot := model.Snapshot{Panes: append([]model.Pane{}, s.state.Panes...), Tasks: []model.Task{s.state.Tasks[0]}}
+	s.mu.Unlock()
+
+	if inbox := deriveInbox(snapshot); len(inbox) != 0 {
+		t.Fatalf("completed brief reached the inbox: %+v", inbox)
+	}
+	graph := snapshotGraph(snapshot)
+	if graph.Nodes[1].Unread != 0 {
+		t.Fatalf("completed brief marked unread: %+v", graph.Nodes[1])
+	}
+	for _, edge := range graph.Edges {
+		if edge.From == "you" && edge.To == "worker" && edge.Active != 0 {
+			t.Fatalf("completed brief counted as active work: %+v", edge)
+		}
+	}
+}

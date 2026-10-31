@@ -75,7 +75,7 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 ./bin/wtable pane edit --role '负责重试逻辑' coder
 ```
 
-面板选择非 Shell 预设时默认启用身份说明；CLI 的 `--brief` 显式开启。说明不超过 2048 UTF-8 字节，保存在 `<WTABLE_HOME>/briefs/<pane>.md`，权限为 `0600`。启用时通过 `WTABLE_BRIEF` 暴露路径，并经 P0 闸门排队投递。内容包括身份、目录、角色、当前有权联系的 peer 和回报约定，不包含凭据。PTY 说明要求 `ack/result`；ACP 由协议自动回报，不要求额外调用 CLI。重启不会自动重放已有说明，可显式重发。
+面板选择非 Shell 预设时默认启用身份说明；CLI 的 `--brief` 显式开启。说明不超过 2048 UTF-8 字节，保存在 `<WTABLE_HOME>/briefs/<pane>.md`，权限为 `0600`。启用时通过 `WTABLE_BRIEF` 暴露路径，并经 P0 闸门排队投递。内容包括身份、目录、角色、当前有权联系的 peer 和回报约定，不包含凭据。brief 是常驻说明，不是委派任务：不占用忙碌闸门，不出现在任务列表或收件箱，也不需要 `ack/result`。之后收到的正式任务仍按 PTY 的 `ack/result` 或 ACP 的回合结束自动回报。重启不会自动重放已有说明，可显式重发。
 
 ACP pane 底部有常驻输入框，直接输入并按 Enter 即通过原任务队列提交，复用当前 session；Alt-Enter 换行，粘贴插入光标处。权限请求始终优先，Enter 不批准。
 

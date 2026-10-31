@@ -137,12 +137,21 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 		return model.Task{}, deniedError("没有发送到此 pane 的授权连线", p.ID)
 	}
 	if a.Kind == "" {
-		a.Kind = "delegation"
+		a.Kind = model.TaskKindDelegation
 	}
-	if !contains([]string{"chat", "delegation", "handoff"}, a.Kind) {
-		return model.Task{}, errors.New("kind 必须为 chat、delegation 或 handoff")
+	if !contains([]string{model.TaskKindChat, model.TaskKindDelegation, model.TaskKindHandoff, model.TaskKindBrief}, a.Kind) {
+		return model.Task{}, errors.New("kind 必须为 chat、delegation、handoff 或 brief")
 	}
-	if a.Kind == "chat" {
+	if a.Kind == model.TaskKindBrief {
+		// Only the workbench itself emits briefs. A peer must not be able to
+		// relabel work as instructions to bypass the busy gate.
+		if principal != "controller" {
+			return model.Task{}, deniedError("brief 只能由工作台发送", p.ID)
+		}
+		a.OnComplete = "none"
+		a.ReportTo = ""
+	}
+	if a.Kind == model.TaskKindChat {
 		// Chat turns are conversation, not delegation: they never schedule a
 		// report or a handoff.
 		a.OnComplete = "none"
@@ -490,6 +499,11 @@ func (s *Server) getTasks(principal, method string, raw json.RawMessage) (any, e
 	}
 	tasks := []model.Task{}
 	for _, t := range s.state.Tasks {
+		// Briefs are standing instructions, not delegated work. task.get still
+		// returns one by ID; the default list stays readable.
+		if t.Kind == model.TaskKindBrief {
+			continue
+		}
 		if principal == "controller" || t.From == principal || t.To == principal {
 			t.Prompt = short(t.Prompt, 300)
 			t.Result = short(t.Result, 500)
@@ -682,6 +696,11 @@ func (s *Server) promoteTask(raw json.RawMessage) (model.Task, error) {
 	var first *model.Task
 	for i := range s.state.Tasks {
 		other := &s.state.Tasks[i]
+		// Keep a queued brief ahead of delegated work; promoting work must not
+		// make the agent start without its instructions.
+		if other.Kind == model.TaskKindBrief {
+			continue
+		}
 		if other.To == t.To && other.State == "queued" && other.ID != t.ID {
 			if first == nil || other.CreatedAt.Before(first.CreatedAt) {
 				first = other
@@ -768,6 +787,10 @@ func (s *Server) interruptSend(principal string, raw json.RawMessage) (model.Tas
 	var active []*model.Task
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
+		// Interrupting a turn must not cancel the standing instructions.
+		if t.Kind == model.TaskKindBrief {
+			continue
+		}
 		if t.To == p.ID && activeState(t.State) {
 			active = append(active, t)
 		}

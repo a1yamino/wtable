@@ -466,7 +466,7 @@ func (u *ui) panelCountOf(tab int) int {
 	case 1:
 		return len(u.panelEdges())
 	case 2:
-		return len(u.snapshot.Tasks)
+		return len(u.orderedTasks())
 	case 3:
 		return len(u.snapshot.Layers)
 	default:

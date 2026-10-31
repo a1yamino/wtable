@@ -46,6 +46,10 @@ func snapshotGraph(snapshot model.Snapshot) *model.Graph {
 	}
 	active := map[model.Edge]int{}
 	for _, task := range snapshot.Tasks {
+		// A brief is standing instructions, not in-flight work or a reply.
+		if task.Kind == model.TaskKindBrief {
+			continue
+		}
 		from := task.From
 		if from == "controller" {
 			from = "you"

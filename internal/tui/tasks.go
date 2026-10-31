@@ -32,6 +32,11 @@ func (u *ui) orderedTasks() []model.Task {
 		if t.Kind == "chat" && !u.allowChat {
 			continue
 		}
+		// A brief is onboarding, not work: the Agents page already shows its
+		// delivery state next to the pane.
+		if t.Kind == model.TaskKindBrief {
+			continue
+		}
 		tasks = append(tasks, t)
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {

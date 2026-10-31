@@ -488,6 +488,9 @@ func (u *ui) graphItems(node string) []graphItem {
 	}
 	items := []graphItem{}
 	for _, t := range u.snapshot.Tasks {
+		if t.Kind == model.TaskKindBrief {
+			continue
+		}
 		if t.From != node && t.To != node {
 			continue
 		}

@@ -126,7 +126,7 @@ func (u *ui) legendOnce(glyph string) {
 func (u *ui) queuedTotal() int {
 	count := 0
 	for _, t := range u.snapshot.Tasks {
-		if t.State == "queued" && t.Kind != "chat" {
+		if t.State == "queued" && t.Kind != "chat" && t.Kind != model.TaskKindBrief {
 			count++
 		}
 	}
@@ -141,7 +141,7 @@ func (u *ui) unreadTotal() int {
 		total += p.Unread
 	}
 	for _, t := range u.snapshot.Tasks {
-		if t.From == "controller" && t.To != "controller" && !t.Seen && (t.State == "completed" || t.State == "failed" || t.State == "unknown") && t.Kind != "chat" {
+		if t.From == "controller" && t.To != "controller" && !t.Seen && (t.State == "completed" || t.State == "failed" || t.State == "unknown") && t.Kind != "chat" && t.Kind != model.TaskKindBrief {
 			total++
 		}
 	}

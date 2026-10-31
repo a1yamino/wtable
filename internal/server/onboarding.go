@@ -263,11 +263,12 @@ func (s *Server) briefTextLocked(p model.Pane, extra []string) (string, error) {
 	sort.Strings(peers)
 	text := fmt.Sprintf("# Worktable brief\nName: %s\nPane: %s\nRole: %s\nCwd: %s\nLayer: %s\nPermitted outgoing peers: %s\n", p.Name, p.ID, p.Role, p.Cwd, p.Layer, strings.Join(peers, ", "))
 	text += "\n## Collaboration contract\n"
+	text += "This brief is your standing instructions, not a delegated task. Do not ack or result it.\n"
 	text += "Check current peers before sending: \"$WTABLE_CLI\" peers. Grants can change.\n"
 	if p.Backend == "acp" {
-		text += "Tasks arrive through ACP session/prompt; turn completion reports the result automatically. Do not call CLI ack, next or result for ACP tasks.\n"
+		text += "Delegated work arrives through ACP session/prompt; turn completion reports the result automatically. Do not call CLI ack, next or result for ACP tasks.\n"
 	} else {
-		text += "For injected tasks (including this brief), read task_id in the envelope; accept with \"$WTABLE_CLI\" ack <task-id>; finish with \"$WTABLE_CLI\" result <task-id> <result>. ACK is not completion.\nFor claim tasks only: \"$WTABLE_CLI\" next claims work; finish with the same result command. Never use next to claim injected tasks.\n"
+		text += "Delegated work arrives later as an injected task envelope. Read task_id in the envelope; accept with \"$WTABLE_CLI\" ack <task-id>; finish with \"$WTABLE_CLI\" result <task-id> <result>. ACK is not completion.\nFor claim tasks only: \"$WTABLE_CLI\" next claims work; finish with the same result command. Never use next to claim injected tasks.\n"
 	}
 	text += "Send only to permitted peers. For PTY peers use \"$WTABLE_CLI\" send --queue --delivery inject <peer-id> <text>; for ACP peers use --delivery prompt instead. You cannot recruit/spawn agents or add/remove edges. Never print tokens or credentials.\n"
 	if p.RoleTemplate != "" {
@@ -301,7 +302,7 @@ func (s *Server) writeBrief(p *model.Pane, text string) error {
 }
 
 func (s *Server) enqueueBriefLocked(p *model.Pane, text string) (model.Task, error) {
-	task, err := s.createTaskLocked("controller", model.SendParams{To: p.ID, Prompt: text, Queue: true}, "")
+	task, err := s.createTaskLocked("controller", model.SendParams{To: p.ID, Prompt: text, Kind: model.TaskKindBrief, Queue: true}, "")
 	if err != nil {
 		return task, err
 	}
