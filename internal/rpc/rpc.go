@@ -63,6 +63,9 @@ func (c *Client) Call(ctx context.Context, method string, args, result any) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// The implicit deadline is a safety net for short calls, not a contract for
+	// blocking ones. Callers that legitimately wait longer (task.next/wait,
+	// ACP restart, git) must pass a context with their own deadline.
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(15 * time.Second)

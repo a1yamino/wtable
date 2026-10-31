@@ -12,6 +12,12 @@ import (
 	"wtable/internal/model"
 )
 
+// maxTaskContentBytes bounds the aggregate prompt/result text a long-lived
+// state directory can accumulate. The per-task limits alone still allow
+// 2,000 * 1 MiB of retained content, and every mutation marshals the whole
+// state; this cap keeps a single agent from making the daemon unresponsive.
+const maxTaskContentBytes = 64 << 20
+
 func (s *Server) edge(method string, raw json.RawMessage) (any, error) {
 	var a model.Edge
 	if err := decode(raw, &a); err != nil {
@@ -117,6 +123,12 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 	if err != nil {
 		return model.Task{}, err
 	}
+	// Steering only makes sense while a turn is in progress. Accepting it for
+	// an idle pane would strand it in the queue and later inject it into an
+	// unrelated turn, so reject it at the sender instead.
+	if mode == "steer" && !s.paneBusyLocked(p.ID) {
+		return model.Task{}, errors.New("steer 需要目标正在执行 turn；目标当前空闲，请改用普通 send 或稍后重试")
+	}
 	a.DeliveryMode = mode
 	if a.OnComplete == "" {
 		a.OnComplete = "none"
@@ -172,6 +184,9 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 	if len(s.state.Tasks) >= 2000 {
 		return model.Task{}, errors.New("MVP 任务记录上限为 2,000 条")
 	}
+	if s.taskContentBytesLocked()+len(a.Prompt) > maxTaskContentBytes {
+		return model.Task{}, errors.New("任务内容总量已达到 64 MiB 上限；请缩短内容或使用新的 WTABLE_HOME")
+	}
 	now := time.Now()
 	origin := principal
 	if origin == "controller" {
@@ -183,8 +198,10 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 }
 
 func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
+	// A pointer distinguishes an omitted field (default 30s) from an explicit
+	// timeout_ms=0, which the CLI documents as "return immediately".
 	var a struct {
-		TimeoutMS int `json:"timeout_ms"`
+		TimeoutMS *int `json:"timeout_ms"`
 	}
 	if len(raw) > 0 {
 		_ = decode(raw, &a)
@@ -199,12 +216,13 @@ func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
 	}
 	s.mu.Unlock()
 
-	timeout := time.Duration(a.TimeoutMS) * time.Millisecond
-	if a.TimeoutMS <= 0 {
-		timeout = 30 * time.Second
-	}
-	if a.TimeoutMS < 0 {
-		timeout = 0
+	timeout := 30 * time.Second
+	if a.TimeoutMS != nil {
+		if *a.TimeoutMS <= 0 {
+			timeout = 0
+		} else {
+			timeout = time.Duration(*a.TimeoutMS) * time.Millisecond
+		}
 	}
 	deadline := time.Now().Add(timeout)
 	for {
@@ -234,8 +252,9 @@ func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
 			t.QueueReason = ""
 			t.UpdatedAt = now
 			copy := *t
+			err := s.saveLocked()
 			s.mu.Unlock()
-			return copy, s.saveLocked()
+			return copy, err
 		}
 		s.mu.Unlock()
 
@@ -337,6 +356,16 @@ func finished(state string) bool {
 	return state == "completed" || state == "failed" || state == "cancelled"
 }
 
+// taskContentBytesLocked reports the retained prompt/result bytes. It is a
+// simple scan: callers already hold s.mu and the record cap is 2,000.
+func (s *Server) taskContentBytesLocked() int {
+	total := 0
+	for i := range s.state.Tasks {
+		total += len(s.state.Tasks[i].Prompt) + len(s.state.Tasks[i].Result)
+	}
+	return total
+}
+
 func (s *Server) taskResult(principal string, raw json.RawMessage) (any, error) {
 	return s.finishTask(principal, raw, false)
 }
@@ -371,6 +400,10 @@ func (s *Server) finishTask(principal string, raw json.RawMessage, manual bool) 
 	if !contains([]string{"running", "delivered", "accepted", "unknown", "cancelled", "failed", "cancelling"}, t.State) {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("任务状态为 %s，不能提交结果", t.State)
+	}
+	if delta := len(a.Result) - len(t.Result); delta > 0 && s.taskContentBytesLocked()+delta > maxTaskContentBytes {
+		s.mu.Unlock()
+		return nil, errors.New("任务内容总量已达到 64 MiB 上限；请缩短结果或使用新的 WTABLE_HOME")
 	}
 	t.State = "completed"
 	if a.Failed {
@@ -445,9 +478,12 @@ func (s *Server) runQueue(paneID string) {
 			if t.To == paneID && t.State == "queued" && (t.DeliveryMode == "prompt" || t.DeliveryMode == "") && (t.From == "controller" || s.hasEdgeLocked(t.From, paneID)) {
 				t.State = "delivered"
 				t.DeliveryMode = "prompt"
+				t.DeliveredVia = "prompt"
+				t.DeliveryStatus = "submitted"
+				t.DeliveryError = ""
+				t.QueueReason = ""
 				now := time.Now()
 				t.DeliveredAt = &now
-				t.DeliveryStatus = "submitted"
 				t.UpdatedAt = now
 				taskID = t.ID
 				prompt = t.Prompt
@@ -543,12 +579,12 @@ func (s *Server) cancelTask(raw json.RawMessage) (any, error) {
 	}
 	a := s.agents[t.To]
 	term := s.terminals[t.To]
-	if t.State != "queued" && taskMode(*t) == "pull" {
+	if t.State != "queued" && taskMode(*t) == "pull" && !args.Confirmed {
 		s.mu.Unlock()
-		return nil, errors.New("PTY 领取任务不能可靠取消；请停止 pane 并检查执行结果")
+		return nil, errors.New("PTY 领取任务不能可靠取消；确认工作已停止后使用 --confirmed，或停止 pane")
 	}
 	running := t.State != "queued"
-	if running && a == nil && args.Confirmed && t.State != "cancelling" {
+	if running && a == nil && args.Confirmed && t.State != "cancelling" && taskMode(*t) != "pull" {
 		s.mu.Unlock()
 		return nil, errors.New("请先请求取消，再确认任务已经停止")
 	}

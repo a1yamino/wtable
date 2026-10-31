@@ -102,6 +102,26 @@ func (s *Server) pumpStep(paneID string) {
 	}
 	for _, t := range order {
 		m := taskMode(*t)
+		// A steer that was queued for a turn which has already ended (or a
+		// capability that was revoked) must not wait forever. Turn it into
+		// ordinary work so it cannot be injected into a later unrelated turn.
+		if m == "steer" && (!caps.PushSteer || !s.paneBusyLocked(paneID)) {
+			t.DeliveryMode = "push"
+			if t.QueueReason != "steer_expired: 目标已空闲或不再支持 steer，已改为普通投递" {
+				t.QueueReason = "steer_expired: 目标已空闲或不再支持 steer，已改为普通投递"
+				t.UpdatedAt = time.Now()
+				s.saveLocked()
+			}
+			m = "push"
+		}
+		if m == "prompt" && (!caps.Prompt || p.Backend != "acp") {
+			if t.QueueReason != "caps: 目标已不再接受 prompt 投递" {
+				t.QueueReason = "caps: 目标已不再接受 prompt 投递"
+				t.UpdatedAt = time.Now()
+				s.saveLocked()
+			}
+			continue
+		}
 		if m == "steer" && caps.PushSteer && !steerBusy && (p.TurnState == "running" || activeID != "") {
 			// Steering exists to reach a pane that is already working, so it
 			// bypasses the serial check below.
@@ -142,11 +162,15 @@ func (s *Server) pumpStep(paneID string) {
 		return
 	}
 	// Keep the task queued and remember why, so the UI can explain the wait.
+	// The reason is peer-visible, so never copy a raw target screen line here.
 	s.mu.Lock()
-	if t := s.taskLocked(id); t != nil && t.State == "queued" && t.QueueReason != err.Error() {
-		t.QueueReason = err.Error()
-		t.UpdatedAt = time.Now()
-		s.saveLocked()
+	if t := s.taskLocked(id); t != nil && t.State == "queued" {
+		reason := sanitizedDeliveryReason(err, t.From)
+		if t.QueueReason != reason {
+			t.QueueReason = reason
+			t.UpdatedAt = time.Now()
+			s.saveLocked()
+		}
 	}
 	s.mu.Unlock()
 }

@@ -57,7 +57,7 @@ Press `Ctrl-a a` to open the panel. Tab / Shift-Tab switches pages, arrow keys o
 
 | Page | Actions |
 |---|---|
-| Agents | `a` add, `e` edit name/role/account, `d` remove, Enter focus, `p` park/open, `v` peek, `B` preview brief, `b` resend brief, `O` roles, `l` diagnostics, `R` restart |
+| Agents | `a` add, `e` edit name/role/account, `d` remove, Enter action list (first entry opens), `p` park/open, `v` peek, `B` preview brief, `b` resend brief, `O` roles, `l` diagnostics, `R` restart |
 | Edges | `a` choose a source and multiple targets, `x` delete, `t` filter by the focused pane |
 | Tasks | `s` send to multiple targets, Enter action list (details/retry/cancel), `r` retry, `x` cancel, `b` reports |
 | Layers | `n` create a worktree, Enter use its directory for new panes |
@@ -215,6 +215,8 @@ Delivery defaults follow the target's capabilities: ACP targets use `prompt`, PT
 ./bin/wtable send --queue coder 'Deliver once the gate allows it'
 ```
 
+Steering is accepted only when the target is currently executing a turn and declares `push_steer`. Sending it to an idle pane is rejected rather than queued; if the turn ends before delivery, a queued steer is downgraded to ordinary `push` so it cannot be injected into a later, unrelated turn.
+
 Injection checks process liveness, blocked text, output settling, and previous unfinished injection. Defaults are 400ms settling, 3s verification, and 90s ACK timeout. Direct `codex`, `claude`, and `agy` commands use built-in blocked-text patterns. `gemini`, `opencode`, `grok`, and other programs or wrappers require explicit configuration; they are not validated built-in adapters:
 
 ```sh
@@ -222,7 +224,7 @@ Injection checks process liveness, blocked text, output settling, and previous u
   --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
 ```
 
-Rejection returns `blocked:<line>`, `busy:<task>`, or `not-ready` without writing input. Explicit `--queue` retains work until the gate permits delivery. Delivered, accepted, and cancelling injections all hold the busy gate. ACK does not release it, and ACK timeout does not end accepted work. Bracketed-paste applications receive a complete envelope in one submission; other applications receive a single-line JSON envelope with the task ID, prompt, and acknowledgement instructions. Terminal control characters in task text (including ESC and CR) are rendered as Unicode control pictures, so a prompt cannot terminate bracketed paste early or submit extra lines. The target terminal may limit long input lines; the complete prompt remains available through `task TASK_ID`.
+Rejection returns `blocked:<line>`, `busy:<task>`, or `not-ready` without writing input. A linked agent sender sees only the `blocked` category; the matched terminal line (redacted and clipped) is reserved for the controller. Explicit `--queue` retains work until the gate permits delivery. Delivered, accepted, and cancelling injections all hold the busy gate. ACK does not release it, and ACK timeout does not end accepted work. Bracketed-paste applications receive a complete envelope in one submission; other applications receive a single-line JSON envelope with the task ID, prompt, and acknowledgement instructions. Terminal control characters in task text (including ESC and CR) are rendered as Unicode control pictures, so a prompt cannot terminate bracketed paste early or submit extra lines. The target terminal may limit long input lines; the complete prompt remains available through `task TASK_ID`.
 
 `delivered` proves a write or protocol dispatch, not that the agent has accepted work. A PTY receiver calls `ack` to become `accepted`, or submits a result directly as evidence. Echo-only verification records `write-unconfirmed`. ACK timeout becomes `unknown`, never an automatic retry. ACP becomes accepted on the first update for the active turn and completes on the prompt response; CLI `result` is unnecessary.
 
@@ -260,13 +262,14 @@ The original sender's grant to the report target is checked at creation and comp
 ./bin/wtable task fail TASK_ID 'Failure reason'
 ./bin/wtable task retry --to reviewer TASK_ID
 ./bin/wtable cancel TASK_ID
-# Run only after confirming the PTY work has stopped.
+# Run only after confirming the PTY work has stopped. Also releases a running
+# pull claim so the pane queue can continue.
 ./bin/wtable cancel --confirmed TASK_ID
 ```
 
 Retry accepts failed, unknown, cancelled, or write-unconfirmed tasks, preserves the original record, and links a new task through `RetryOf`. Queued or executing tasks cannot be retried. Retrying write-unconfirmed work marks the old record unknown and still accepts its late result; explicit retry can duplicate work.
 
-Queued tasks cancel immediately; ACP cancellation awaits protocol acknowledgement. Injected PTY work first receives an interrupt and enters `cancelling`, then requires human stop confirmation to become `cancelled`. Terminal history and previous file effects are not erased. Legacy running claim tasks cannot be cancelled reliably; inspect or stop the pane instead.
+Queued tasks cancel immediately; ACP cancellation awaits protocol acknowledgement. Injected PTY work first receives an interrupt and enters `cancelling`, then requires human stop confirmation to become `cancelled`. Terminal history and previous file effects are not erased. A running `pull` claim cannot be stopped through the workbench; after confirming the work has stopped, `cancel --confirmed` releases the pane queue by marking it `cancelled`.
 
 Links restrict workbench API access, not direct file access by the same operating system user. Worktrees isolate working directories; they are not an operating system sandbox.
 
@@ -323,7 +326,7 @@ External provider authentication, adapter compatibility, and session recovery mu
 - The TUI polls full cell snapshots; cell deltas and event replay are not implemented. The original performance targets have not been validated.
 - Mouse selection and copying visible content are supported, alongside keyboard scrollback and copying the visible screen. Wheel forwarding to mouse-aware applications is supported; click/drag forwarding and the OSC 52 clipboard protocol are not supported.
 - Layout trees, tabs, parking, size proportions, focus, and zoom belong to the current TUI session. Reattaching starts in focus mode.
-- Up to 32 panes and 2,000 task records are retained. Panes can be removed from Agents; task history has no cleanup command. The structured chat view is bounded, while complete task results are stored separately.
+- Up to 32 panes and 2,000 task records are retained, with a 64 MiB aggregate prompt/result budget. Panes can be removed from Agents; task history has no cleanup command. The structured chat view is bounded, while complete task results are stored separately.
 - Notes, an embedded editor, account pools, scheduled tasks, images, and browser portals are planned for later versions.
 
 P0 delivery/reporting, P1 control-panel onboarding, and P2 Graph v1 are implemented. `docs/`, `.dev/`, and `bin/` remain outside the Git allowlist.

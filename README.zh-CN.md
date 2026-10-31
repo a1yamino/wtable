@@ -57,7 +57,7 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 
 | 页面 | 操作 |
 |---|---|
-| Agents | `a` 添加、`e` 编辑名字/角色/账号、`d` 移除、Enter 跳转、`p` 驻留／打开、`v` 查看最近 20 行、`B` 预览说明、`b` 重发说明、`O` 角色库、`l` 诊断、`R` 重启 |
+| Agents | `a` 添加、`e` 编辑名字/角色/账号、`d` 移除、Enter 操作列表（首项为打开）、`p` 驻留／打开、`v` 查看最近 20 行、`B` 预览说明、`b` 重发说明、`O` 角色库、`l` 诊断、`R` 重启 |
 | Edges | `a` 选择来源和多个目标、`x` 删除、`t` 只看当前 pane 相关的边 |
 | Tasks | `s` 多目标派活、Enter 动作列表（详情/重发/取消）、`r` 重发、`x` 取消、`b` 报告收件箱 |
 | Layers | `n` 创建 worktree、Enter 将选中目录设为新 pane 的默认目录 |
@@ -225,6 +225,8 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 ./bin/wtable send --queue coder '闸门允许后再发送'
 ```
 
+Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；发给空闲目标会直接报错而不是排队。若 turn 在投递前结束，已排队的 steer 会降级为普通 `push`，避免被插进之后一个无关的 turn。
+
 注入前会检查进程、阻塞文案、输出稳定时间和未结束的前一条注入任务。默认稳定窗口为 400ms，写后验证为 3s，ACK 超时为 90s。直接启动 `codex`、`claude`、`agy` 时使用内置阻塞文案；`gemini`、`opencode`、`grok` 和其他程序或包装脚本需要自行配置，暂不属于已验证的内置适配：
 
 ```sh
@@ -232,7 +234,7 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
   --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
 ```
 
-闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；`--queue` 才会保留任务并等待闸门。前一条注入任务处于 `delivered`、`accepted` 或 `cancelling` 时都算 busy；ACK 不解除 busy，ACK 超时也不会结束已接手的任务。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。任务文本中的终端控制字符（含 ESC 与 CR）会显示为 Unicode 控制图片，prompt 无法提前结束 bracketed paste 或提交额外行。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
+闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；有授权连线的 agent 发送方只会看到 `blocked` 类别，命中的终端行（已脱敏并截断）仅对控制端可见。`--queue` 才会保留任务并等待闸门。前一条注入任务处于 `delivered`、`accepted` 或 `cancelling` 时都算 busy；ACK 不解除 busy，ACK 超时也不会结束已接手的任务。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。任务文本中的终端控制字符（含 ESC 与 CR）会显示为 Unicode 控制图片，prompt 无法提前结束 bracketed paste 或提交额外行。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
 
 `delivered` 只证明写入或协议投递。PTY agent 调用 `ack` 才进入 `accepted`；直接提交结果也可证明已接手。写后只看到回显时记录 `write-unconfirmed`，这不是失败，也不是完成。ACK 超时变为 `unknown`，不自动重投。ACP 首个当前 turn 的更新进入 `accepted`，turn 结束自动完成，不需要 CLI `result`。
 
@@ -272,12 +274,13 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 ./bin/wtable task retry --to reviewer TASK_ID
 ./bin/wtable cancel TASK_ID
 # 确认 PTY 工作已停止后再执行，不把 Ctrl-C 当成停止证明。
+# 执行中的 pull 领取也用它释放 pane 队列。
 ./bin/wtable cancel --confirmed TASK_ID
 ```
 
 重发只接受失败、未知、取消或写入未确认的任务，保留原记录，并用 `RetryOf` 关联新任务。已在执行或排队的任务不能重发。重发写入未确认的任务时，原记录转为 `unknown` 并继续接受迟到结果；显式重发仍可能造成重复工作。
 
-排队任务直接取消；ACP 等待协议确认。注入任务先发送中断，进入 `cancelling`，再由人确认 `cancelled`。终端历史和已发生的文件操作不会被撤销。旧 claim 模式的执行中 PTY 任务仍不能可靠取消，需要检查或停止 pane。
+排队任务直接取消；ACP 等待协议确认。注入任务先发送中断，进入 `cancelling`，再由人确认 `cancelled`。终端历史和已发生的文件操作不会被撤销。执行中的 `pull` 领取无法由 workbench 可靠停止；人工确认工作已停止后，用 `cancel --confirmed` 将其标记为 `cancelled` 并释放该 pane 的队列。
 
 `wtable audit` 返回最近 256 条越权拒绝记录，只包含调用者、目标、方法与时间；每个 pane 的累计次数保存在元数据中。记录不包含请求正文或凭据。直接边检查已阻止 agent 向自身派活；目前没有内容来源追踪或 `--no-relay` 模式。
 
@@ -336,7 +339,7 @@ smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授�
 - 使用完整 cell 快照轮询，尚未实现 cell 差分与事件重放；原计划中的性能预算尚未验收。
 - 支持可见内容的鼠标选区复制、键盘回看和复制可见屏；支持向启用鼠标协议的应用转发滚轮，暂不转发点击和拖动，也不支持 OSC 52 剪贴板协议。
 - pane 的布局树、tabs、大小比例、焦点、驻留和 zoom 属于当前 TUI 状态，detach 后从单看开始。
-- 最多保留 32 个 pane、2,000 条任务；pane 可从 Agents 页移除，任务历史尚无清理命令。结构化聊天视图有大小上限，完整任务结果单独保存。
+- 最多保留 32 个 pane、2,000 条任务，prompt 与 result 合计上限 64 MiB；pane 可从 Agents 页移除，任务历史尚无清理命令。结构化聊天视图有大小上限，完整任务结果单独保存。
 - notes、内置编辑器、账号池、计划任务、图片和浏览器门户属于后续范围。
 
 当前实现完成 P0 送达与回传、P1 控制面板和身份说明接入，以及 P2 Graph v1。`docs/`、`.dev/` 和 `bin/` 均由 Git 白名单规则忽略。

@@ -77,7 +77,10 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 		defer cancel()
 		_ = client.Call(detachCtx, "ui.detach", struct{}{}, nil)
 	}()
-	screen, err := tcell.NewScreen()
+	// Agent output, task results and report summaries are untrusted. tcell
+	// sanitises control characters from Put/PutStr when this option is set;
+	// leaving it off lets a trailing ESC/CR reach the outer terminal.
+	screen, err := tcell.NewScreen(tcell.OptSanitizeContent(true))
 	if err != nil {
 		return err
 	}
@@ -144,7 +147,12 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 		case <-ticker.C:
 			changed, err := u.refresh()
 			if err != nil {
-				return err
+				// A transient daemon stall (large state, slow disk) must not
+				// tear down the local UI. Keep the last frame and show why it
+				// stopped refreshing; the next tick retries.
+				u.status = "刷新失败：" + err.Error()
+				u.draw()
+				continue
 			}
 			if changed {
 				u.resize()

@@ -461,7 +461,10 @@ func (s *Server) message(id, runID, role, text string) {
 	if len(p.Messages) > 200 {
 		p.Messages = p.Messages[len(p.Messages)-200:]
 	}
-	s.saveLocked()
+	// ACP streams many chunks per turn. Persisting the whole state on every
+	// chunk blocks the protocol reader; deliveryLoop flushes chat shortly after
+	// it settles, while task state changes still save immediately.
+	s.chatDirty = true
 }
 
 func (s *Server) permission(ctx context.Context, paneID, runID string, p model.Permission) (string, error) {

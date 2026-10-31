@@ -283,8 +283,11 @@ func run(args []string) error {
 		if len(args) != 2 {
 			return fmt.Errorf("用法：wtable %s <pane>", args[0])
 		}
+		// An ACP restart may spend up to 30s in initialize/session-load.
+		paneCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
 		var out any
-		if err = call("pane."+args[0], map[string]string{"id": args[1]}, &out); err != nil {
+		if err = c.Call(paneCtx, "pane."+args[0], map[string]string{"id": args[1]}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -307,7 +310,7 @@ func run(args []string) error {
 		key := fs.String("key", "", "任务去重键")
 		delivery := fs.String("delivery", "", "push、steer、prompt 或 pull（省略时按目标能力选择）")
 		queue := fs.Bool("queue", false, "目标忙时显式排队")
-		steer := fs.Bool("steer", false, "作为当前 turn 的追加要求插入（需目标声明支持）")
+		steer := fs.Bool("steer", false, "作为当前 turn 的追加要求插入（需目标声明支持且正在执行）")
 		onComplete := fs.String("on-complete", "", "none、notify 或 handoff")
 		reportTo := fs.String("report-to", "", "结果回传目标 pane")
 		parentTask := fs.String("parent", "", "关联的父任务 ID")
@@ -356,8 +359,16 @@ func run(args []string) error {
 		if err = fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		wait := *timeout
+		if wait < 0 {
+			wait = 0
+		}
+		// rpc.Call falls back to a 15s deadline when the context has none. A
+		// blocking next must be allowed to outlive that default.
+		nextCtx, cancel := context.WithTimeout(ctx, wait+5*time.Second)
+		defer cancel()
 		var t *model.Task
-		if err = call("task.next", map[string]any{"timeout_ms": timeout.Milliseconds()}, &t); err != nil {
+		if err = c.Call(nextCtx, "task.next", map[string]any{"timeout_ms": timeout.Milliseconds()}, &t); err != nil {
 			return err
 		}
 		if t == nil {
@@ -408,8 +419,14 @@ func run(args []string) error {
 		if len(fs.Args()) != 1 {
 			return errors.New("用法：wtable wait [--timeout 10m] <task-id>")
 		}
+		wait := *timeout
+		if wait <= 0 {
+			wait = 60 * time.Second // matches the server's default
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, wait+5*time.Second)
+		defer cancel()
 		var t model.Task
-		err = call("task.wait", map[string]any{"id": fs.Args()[0], "timeout_ms": timeout.Milliseconds()}, &t)
+		err = c.Call(waitCtx, "task.wait", map[string]any{"id": fs.Args()[0], "timeout_ms": timeout.Milliseconds()}, &t)
 		if err != nil {
 			return err
 		}
@@ -485,7 +502,7 @@ func run(args []string) error {
 			return err
 		}
 		if len(fs.Args()) != 1 {
-			return errors.New("用法：wtable cancel [--confirmed] <task-id>；--confirmed 仅在人工确认 PTY 工作已停止后使用")
+			return errors.New("用法：wtable cancel [--confirmed] <task-id>；--confirmed 仅在人工确认 PTY 工作已停止后使用；pull 领取任务必须使用 --confirmed")
 		}
 		var out any
 		if err = call("task.cancel", map[string]any{"id": fs.Args()[0], "confirmed": *confirmed}, &out); err != nil {
@@ -554,7 +571,10 @@ func run(args []string) error {
 			return err
 		}
 		var out model.Layer
-		if err = call("layer.create", map[string]string{"name": args[2], "cwd": abs, "base": *base}, &out); err != nil {
+		// createLayer may run several 30s git commands (rev-parse, worktree add).
+		layerCtx, cancel := context.WithTimeout(ctx, 130*time.Second)
+		defer cancel()
+		if err = c.Call(layerCtx, "layer.create", map[string]string{"name": args[2], "cwd": abs, "base": *base}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -568,7 +588,9 @@ func run(args []string) error {
 				a["path"] = args[1]
 			}
 		}
-		if err = call(method, a, &out); err != nil {
+		gitCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+		defer cancel()
+		if err = c.Call(gitCtx, method, a, &out); err != nil {
 			return err
 		}
 		fmt.Print(out)
@@ -852,7 +874,7 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
   wtable ask [OPTIONS] PANE PROMPT         投递并等待（--timeout 默认 10m）
     --key KEY --delivery push|steer|prompt|pull --queue --steer
     --on-complete none|notify|handoff --report-to PANE --parent TASK
-  wtable next [--timeout 30s]               pane 内领取任务，输出 JSON
+  wtable next [--timeout 30s]               pane 内领取任务，输出任务 ID 与内容（--json 输出完整记录）
   wtable ack TASK                         接收 pane 确认已接手
   wtable result [--failed] TASK TEXT|-     接收 pane 提交结果；- 读取 stdin
   wtable wait [--timeout 10m] TASK          等待已有任务
@@ -862,7 +884,7 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
   wtable task confirm TASK | task seen TASK   人工确认送达、标记已读
   wtable task result TASK                  读取完整结果
   wtable cancel [--confirmed] TASK         请求取消；PTY 中断后需人工确认已停止
-    --confirmed 仅表示人工已确认 PTY 工作停止，不自动确认
+    --confirmed 仅表示人工已确认工作停止；pull 领取任务也用它释放队列
   wtable reports | report ID | report seen ID  报告收件箱、详情、已读
   wtable role list | put [OPTIONS] NAME FILE | delete NAME   角色模板
   wtable audit                            最近越权拒绝记录（最多 256 条）

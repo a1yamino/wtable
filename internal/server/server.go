@@ -26,6 +26,10 @@ import (
 	"wtable/internal/terminal"
 )
 
+// maxConnections bounds sockets/goroutines an authenticated or unauthenticated
+// local process can hold open. One TUI plus normal CLI calls are far below it.
+const maxConnections = 64
+
 type approval struct {
 	permission model.Permission
 	answer     chan string
@@ -59,6 +63,8 @@ type Server struct {
 	pumps             map[string]*pumpState
 	nextWaiters       map[string]chan struct{}
 	taskWaiters       map[string]chan struct{}
+	chatDirty         bool
+	chatSavedAt       time.Time
 	closing           bool
 }
 
@@ -156,8 +162,13 @@ func Run(ctx context.Context, paths config.Paths) error {
 			}
 			return err
 		}
-		next++
 		s.mu.Lock()
+		if len(s.connections) >= maxConnections {
+			s.mu.Unlock()
+			conn.Close()
+			continue
+		}
+		next++
 		s.connections[conn] = struct{}{}
 		s.mu.Unlock()
 		wg.Add(1)
@@ -317,8 +328,12 @@ func (s *Server) saveLocked() error {
 	if err != nil {
 		s.storeErr = err
 		log.Printf("state persistence failed: %v", err)
+		return err
 	}
-	return err
+	// A full successful save makes the durable copy match memory again, so a
+	// transient error no longer needs to keep the daemon in fail-closed mode.
+	s.storeErr = nil
+	return nil
 }
 
 func clonePane(p model.Pane) model.Pane {
@@ -364,7 +379,15 @@ func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 		return model.Snapshot{}, err
 	}
 	s.mu.Lock()
-	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Reports: append([]model.Report{}, s.state.Reports...), Layers: append([]model.Layer{}, s.state.Layers...)}
+	// The TUI polls this every ~33ms. Keep list payloads bounded; report detail
+	// still fetches the full 4 KiB summary through report.get.
+	reports := make([]model.Report, 0, len(s.state.Reports))
+	for _, r := range s.state.Reports {
+		r.Summary = short(r.Summary, 500)
+		r.Error = short(r.Error, 500)
+		reports = append(reports, r)
+	}
+	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Reports: reports, Layers: append([]model.Layer{}, s.state.Layers...)}
 	terms := map[string]*terminal.Terminal{}
 	for _, p := range s.state.Panes {
 		result.Panes = append(result.Panes, s.paneMetadataLocked(p))

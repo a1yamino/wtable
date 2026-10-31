@@ -18,6 +18,17 @@ func activeState(state string) bool {
 	return contains([]string{"running", "delivered", "accepted", "cancelling"}, state)
 }
 
+// sanitizedDeliveryReason keeps target-screen content out of peer-visible
+// task fields. The controller may still see the matched line (already
+// redacted by readyLocked) for diagnosis; a linked peer gets a category only.
+func sanitizedDeliveryReason(err error, from string) string {
+	msg := err.Error()
+	if from != "controller" && strings.HasPrefix(msg, "blocked:") {
+		return "blocked: 目标终端命中了阻塞规则；详细屏幕内容仅控制端可见"
+	}
+	return msg
+}
+
 // taskMode normalises the stored delivery value. Older records used inject and
 // claim; both are still readable, they just map onto the current names.
 func taskMode(t model.Task) string {
@@ -137,6 +148,10 @@ func (s *Server) readyLocked(p *model.Pane, allowBusy bool) error {
 		}
 		for _, line := range lines {
 			if re.MatchString(line) {
+				// The matched screen line stays on the controller side. Peers get
+				// a category only (see sanitizedDeliveryReason); this path also
+				// redacts values the daemon knows are credentials.
+				line = clipColumns(s.diagnosticTextLocked(p.ID, line), 160)
 				return fmt.Errorf("blocked:%s", line)
 			}
 		}
@@ -153,6 +168,7 @@ func (s *Server) readyLocked(p *model.Pane, allowBusy bool) error {
 	}
 	return nil
 }
+
 // taskText neutralises terminal controls in task content. The bracketed-paste
 // and steer paths send the envelope verbatim, so an ESC inside a prompt could
 // close the paste early and turn the rest into keystrokes, while CR could
@@ -175,6 +191,7 @@ func taskText(s string) string {
 func taskEnvelope(t model.Task) string {
 	return fmt.Sprintf("[WTABLE TASK %s]\n%s\n[WTABLE END %s]\nAccept this task with: \"$WTABLE_CLI\" ack %s\nWhen finished, submit the full result with: \"$WTABLE_CLI\" result %s <result>\nDo not print credentials.\n", t.ID, taskText(t.Prompt), t.ID, t.ID, t.ID)
 }
+
 // steerEnvelope marks text as an addition to the running turn, not a new task.
 func steerEnvelope(t model.Task, active string) string {
 	if active == "" {
@@ -252,15 +269,38 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 		return errors.New("任务不能投递：状态已改变或服务不可用")
 	}
 	mode = taskMode(*t)
+	// A capability may have been revoked after the task was accepted. Honor
+	// the recipient's current declaration instead of delivering anyway.
+	caps := p.EffectiveCaps()
+	revoked := ""
+	switch {
+	case !caps.ReceiveTasks:
+		revoked = "caps: 目标已不再接受任务投递"
+	case mode == "push" && !caps.PushIdle:
+		revoked = "caps: 目标已不再接受 push 投递"
+	case mode == "steer" && !caps.PushSteer:
+		revoked = "caps: 目标已不再接受 steer 投递"
+	}
+	if revoked != "" {
+		if t.DeliveryError != revoked || t.QueueReason != revoked {
+			t.DeliveryError = revoked
+			t.QueueReason = revoked
+			t.UpdatedAt = time.Now()
+			s.saveLocked()
+		}
+		s.mu.Unlock()
+		return errors.New(revoked)
+	}
 	allowBusy := mode == "steer"
 	if allowBusy && !s.paneBusyLocked(p.ID) {
 		s.mu.Unlock()
 		return errors.New("not-ready: 目标没有正在进行的 turn，steer 不适用")
 	}
 	if err := s.readyLocked(p, allowBusy); err != nil && !prechecked {
-		if t.DeliveryError != err.Error() || t.QueueReason != err.Error() {
-			t.DeliveryError = err.Error()
-			t.QueueReason = err.Error()
+		reason := sanitizedDeliveryReason(err, t.From)
+		if t.DeliveryError != reason || t.QueueReason != reason {
+			t.DeliveryError = reason
+			t.QueueReason = reason
 			t.UpdatedAt = time.Now()
 			s.saveLocked()
 		}
@@ -377,6 +417,15 @@ func (s *Server) deliveryLoop() {
 		if s.storeErr != nil {
 			s.mu.Unlock()
 			continue
+		}
+		if s.chatDirty && time.Since(s.chatSavedAt) >= time.Second {
+			s.chatSavedAt = time.Now()
+			if err := s.saveLocked(); err == nil {
+				s.chatDirty = false
+			} else {
+				s.mu.Unlock()
+				continue
+			}
 		}
 		var wakePanes []string
 		changed := false

@@ -77,11 +77,16 @@ func (s *Server) completeReportLocked(t *model.Task) {
 		} else {
 			now := time.Now()
 			next := model.Task{ID: newID("t-"), From: t.From, Origin: t.Origin, To: recipient.ID, Prompt: fmt.Sprintf("Task %s (%s) finished with state %s.\n%s", t.ID, t.To, t.State, reportSummary(t.Result)), State: "queued", DeliveryMode: mode, ParentTask: t.ID, OnComplete: "none", CreatedAt: now, UpdatedAt: now}
-			r.HandoffTask = next.ID
-			s.state.Tasks = append(s.state.Tasks, next)
-			// Safe while holding s.mu since the pump has its own lock; push and
-			// prompt both make progress immediately instead of waiting a tick.
-			s.wake(next.To)
+			if s.taskContentBytesLocked()+len(next.Prompt) > maxTaskContentBytes {
+				r.State = "undeliverable"
+				r.Error = "任务内容总量已达上限，无法创建 handoff 任务"
+			} else {
+				r.HandoffTask = next.ID
+				s.state.Tasks = append(s.state.Tasks, next)
+				// Safe while holding s.mu since the pump has its own lock; push and
+				// prompt both make progress immediately instead of waiting a tick.
+				s.wake(next.To)
+			}
 		}
 	}
 	if index < 0 {
@@ -174,8 +179,10 @@ func (s *Server) taskMark(principal, method string, raw json.RawMessage) (any, e
 		t.DeliveryStatus = "submitted"
 		t.DeliveryError = ""
 	case "task.seen":
-		if principal != "controller" && principal != t.From && principal != t.To {
-			return nil, deniedError("无权读取任务")
+		// Unread belongs to the recipient. Letting the sender clear it would
+		// hide a completed result from the recipient's inbox.
+		if principal != "controller" && principal != t.To {
+			return nil, deniedError("只有任务接收方可以标记已读")
 		}
 		t.Seen = true
 	}
@@ -207,8 +214,13 @@ func (s *Server) retryTask(raw json.RawMessage) (any, error) {
 		a.To = old.To
 	}
 	// Retrying preserves the original sender's grants; a controller cannot
-	// accidentally elevate an agent's report/handoff authorization.
-	params := model.SendParams{To: a.To, Prompt: old.Prompt, DeliveryMode: old.DeliveryMode, Queue: a.Queue, OnComplete: old.OnComplete, ReportTo: old.ReportTo, ParentTask: old.ParentTask}
+	// accidentally elevate an agent's report/handoff authorization. A steer
+	// belongs to a turn that has already ended, so a retry is ordinary work.
+	delivery := old.DeliveryMode
+	if taskMode(old) == "steer" {
+		delivery = "push"
+	}
+	params := model.SendParams{To: a.To, Prompt: old.Prompt, DeliveryMode: delivery, Queue: a.Queue, OnComplete: old.OnComplete, ReportTo: old.ReportTo, ParentTask: old.ParentTask}
 	if p := s.paneLocked(a.To); p != nil {
 		mode, err := resolveDelivery(p, params.DeliveryMode)
 		if err != nil {

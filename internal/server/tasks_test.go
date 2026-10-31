@@ -83,10 +83,13 @@ func TestHandoffAndLateResults(t *testing.T) {
 			if _, err := s.taskResult("worker", rawTask(map[string]string{"id": "parent", "result": "finished"})); err != nil {
 				t.Fatal(err)
 			}
-			if len(s.state.Tasks) != 2 {
-				t.Fatalf("missing handoff: %+v", s.state.Tasks)
+			s.mu.Lock()
+			tasks := append([]model.Task(nil), s.state.Tasks...)
+			s.mu.Unlock()
+			if len(tasks) != 2 {
+				t.Fatalf("missing handoff: %+v", tasks)
 			}
-			next := s.state.Tasks[1]
+			next := tasks[1]
 			if next.ParentTask != "parent" || next.From != "sender" || next.State != "queued" || next.OnComplete != "none" {
 				t.Fatalf("invalid handoff: %+v", next)
 			}
@@ -113,7 +116,9 @@ func TestPTYGateVerificationAndCancellation(t *testing.T) {
 	if blocked.State != "queued" || !strings.HasPrefix(blocked.QueueReason, "blocked:") {
 		t.Fatalf("blocked gate must report a queue reason: %+v", blocked)
 	}
+	s.mu.Lock()
 	s.state.Panes[0].DeliveryConfig.BlockedRegex = ""
+	s.mu.Unlock()
 	s.wake("pty")
 	var task model.Task
 	deadline = time.Now().Add(2 * time.Second)
