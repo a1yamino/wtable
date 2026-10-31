@@ -153,15 +153,62 @@ func (s *Server) readyLocked(p *model.Pane, allowBusy bool) error {
 	}
 	return nil
 }
+// taskText neutralises terminal controls in task content. The bracketed-paste
+// and steer paths send the envelope verbatim, so an ESC inside a prompt could
+// close the paste early and turn the rest into keystrokes, while CR could
+// submit extra lines. Control pictures keep the text visible and auditable.
+func taskText(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case r < 0x20:
+			return 0x2400 + r // Unicode control pictures: ␛ for ESC, ␍ for CR.
+		case r == 0x7f:
+			return 0x2421
+		case r >= 0x80 && r <= 0x9f:
+			return '�' // C1 controls, including 8-bit CSI.
+		}
+		return r
+	}, s)
+}
 func taskEnvelope(t model.Task) string {
-	return fmt.Sprintf("[WTABLE TASK %s]\n%s\n[WTABLE END %s]\nAccept this task with: \"$WTABLE_CLI\" ack %s\nWhen finished, submit the full result with: \"$WTABLE_CLI\" result %s <result>\nDo not print credentials.\n", t.ID, t.Prompt, t.ID, t.ID, t.ID)
+	return fmt.Sprintf("[WTABLE TASK %s]\n%s\n[WTABLE END %s]\nAccept this task with: \"$WTABLE_CLI\" ack %s\nWhen finished, submit the full result with: \"$WTABLE_CLI\" result %s <result>\nDo not print credentials.\n", t.ID, taskText(t.Prompt), t.ID, t.ID, t.ID)
 }
 // steerEnvelope marks text as an addition to the running turn, not a new task.
 func steerEnvelope(t model.Task, active string) string {
 	if active == "" {
 		active = "当前任务"
 	}
-	return fmt.Sprintf("[WTABLE STEER %s vs %s]\n%s\n[WTABLE STEER END %s]\n这是对 %s 的追加要求，不要开始新任务。无法在本轮内处理就只输出一行：defer %s\n处理了就用 \"$WTABLE_CLI\" result %s <结果> 收尾（不要打印凭据）。\n", t.ID, active, t.Prompt, t.ID, active, t.ID, t.ID)
+	return fmt.Sprintf("[WTABLE STEER %s vs %s]\n%s\n[WTABLE STEER END %s]\n这是对 %s 的追加要求，不要开始新任务。无法在本轮内处理就只输出一行：defer %s\n处理了就用 \"$WTABLE_CLI\" result %s <结果> 收尾（不要打印凭据）。\n", t.ID, active, taskText(t.Prompt), t.ID, active, t.ID, t.ID)
+}
+
+// deliveryPayload renders one delivery attempt. callers use the returned
+// envelope for echo verification, so it must match what reaches the terminal.
+func deliveryPayload(t model.Task, mode, active string, bracketed bool) (envelope, data string) {
+	envelope = taskEnvelope(t)
+	if mode == "steer" {
+		envelope = steerEnvelope(t, active)
+	}
+	switch {
+	case mode == "steer":
+		// Steering is one physical line: the prefix still tells the agent that
+		// this is an addition, and no instruction becomes a second command.
+		data = strings.ReplaceAll(envelope, "\n", " ") + "\r"
+	case bracketed:
+		data = "\x1b[200~" + strings.TrimSuffix(envelope, "\n") + "\x1b[201~\r"
+	default:
+		// One physical line is one submission. JSON retains prompt newlines without
+		// turning each envelope instruction into a separate terminal command.
+		payload, _ := json.Marshal(struct {
+			TaskID       string `json:"task_id"`
+			Prompt       string `json:"prompt"`
+			Instructions string `json:"instructions"`
+		}{t.ID, taskText(t.Prompt), fmt.Sprintf("Accept with \"$WTABLE_CLI\" ack %s; finish with \"$WTABLE_CLI\" result %s <result>. Do not print credentials.", t.ID, t.ID)})
+		envelope = string(payload)
+		data = envelope + "\r"
+	}
+	return envelope, data
 }
 
 func (s *Server) deliverTask(id string) {
@@ -222,7 +269,8 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 	}
 	term := s.terminals[p.ID]
 	config := deliveryConfig(p)
-	before := frameLines(term.Snapshot(0))
+	snapshot := term.Snapshot(0)
+	before := frameLines(snapshot)
 	active := ""
 	if mode == "steer" {
 		for i := range s.state.Tasks {
@@ -232,28 +280,7 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 			}
 		}
 	}
-	envelope := taskEnvelope(*t)
-	if mode == "steer" {
-		envelope = steerEnvelope(*t, active)
-	}
-	data := envelope
-	if mode == "steer" {
-		// Steering is one physical line: the prefix still tells the agent that
-		// this is an addition, and no instruction becomes a second command.
-		data = strings.ReplaceAll(envelope, "\n", " ") + "\r"
-	} else if term.Snapshot(0).BracketedPaste {
-		data = "\x1b[200~" + strings.TrimSuffix(envelope, "\n") + "\x1b[201~\r"
-	} else {
-		// One physical line is one submission. JSON retains prompt newlines without
-		// turning each envelope instruction into a separate terminal command.
-		payload, _ := json.Marshal(struct {
-			TaskID       string `json:"task_id"`
-			Prompt       string `json:"prompt"`
-			Instructions string `json:"instructions"`
-		}{t.ID, t.Prompt, fmt.Sprintf("Accept with \"$WTABLE_CLI\" ack %s; finish with \"$WTABLE_CLI\" result %s <result>. Do not print credentials.", t.ID, t.ID)})
-		envelope = string(payload)
-		data = envelope + "\r"
-	}
+	envelope, data := deliveryPayload(*t, mode, active, snapshot.BracketedPaste)
 	now := time.Now()
 	t.State = "delivered"
 	t.DeliveredAt = &now

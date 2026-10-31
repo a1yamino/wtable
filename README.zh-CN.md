@@ -232,7 +232,7 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
   --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
 ```
 
-闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；`--queue` 才会保留任务并等待闸门。前一条注入任务处于 `delivered`、`accepted` 或 `cancelling` 时都算 busy；ACK 不解除 busy，ACK 超时也不会结束已接手的任务。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
+闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；`--queue` 才会保留任务并等待闸门。前一条注入任务处于 `delivered`、`accepted` 或 `cancelling` 时都算 busy；ACK 不解除 busy，ACK 超时也不会结束已接手的任务。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。任务文本中的终端控制字符（含 ESC 与 CR）会显示为 Unicode 控制图片，prompt 无法提前结束 bracketed paste 或提交额外行。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
 
 `delivered` 只证明写入或协议投递。PTY agent 调用 `ack` 才进入 `accepted`；直接提交结果也可证明已接手。写后只看到回显时记录 `write-unconfirmed`，这不是失败，也不是完成。ACK 超时变为 `unknown`，不自动重投。ACP 首个当前 turn 的更新进入 `accepted`，turn 结束自动完成，不需要 CLI `result`。
 
