@@ -53,13 +53,13 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 
 ## 控制面板与 Agent 接入
 
-按 `Ctrl-a a` 打开面板，Tab / Shift-Tab 切换页面，方向键或滚轮选择条目，Esc 逐级返回。
+按 `Ctrl-a a` 打开面板，Tab / Shift-Tab 切换页面，方向键或滚轮选择条目，Esc 逐级返回。Enter 或 Space 打开选中条目的动作列表，用方向键选择、Enter 执行，不必记忆各页字母键。
 
 | 页面 | 操作 |
 |---|---|
 | Agents | `a` 添加、`e` 编辑名字/角色/账号、`d` 移除、Enter 跳转、`p` 驻留／打开、`v` 查看最近 20 行、`B` 预览说明、`b` 重发说明、`O` 角色库、`l` 诊断、`R` 重启 |
 | Edges | `a` 选择来源和多个目标、`x` 删除、`t` 只看当前 pane 相关的边 |
-| Tasks | `s` 多目标派活、Enter 详情、`r` 重发、`x` 取消、`b` 报告收件箱 |
+| Tasks | `s` 多目标派活、Enter 动作列表（详情/重发/取消）、`r` 重发、`x` 取消、`b` 报告收件箱 |
 | Layers | `n` 创建 worktree、Enter 将选中目录设为新 pane 的默认目录 |
 
 添加 Agent 时可选择预设、PTY/ACP、目录、Layer、角色、账号档案、是否注入说明，以及新 Agent 可以派活给哪些已有 pane。自定义命令支持引号和转义来组合参数，不展开变量或执行 shell 语法。需要 shell 时请显式填写 `/bin/zsh -lc '命令'`。
@@ -143,7 +143,7 @@ Agents 列表显示输出摘要、最近活动、未读、就绪状态、端点�
 
 按 `Ctrl-a G` 打开实时协作图。箭头由发送方指向接收方；环内节点同层，层内按名称排序。虚线 `you → pane` 表示人类入口，不可选中或删除。
 
-`j/k` 选择节点，Enter 单看所选 pane；`e` 切换节点与真实授权边模式，`x` 请求删除选中边。只有 `y` 确认删除，并取消该方向排队任务；`n` 或 Esc 取消，Enter 不确认。方向键移动图视口。底部显示所选节点的关联任务和报告 ID、方向、状态和未读标记，报告带 `report` 标记，PgUp/PgDn 滚动列表。未读与对应的 `bell` 只归接收方；节点框显示名字，选中边详情显示 `active` 数量。Esc 返回终端视图。
+`j/k` 选择节点，Enter 打开所选节点的动作列表，第一项「打开」进入单看；`e` 切换节点与真实授权边模式，`x` 请求删除选中边。只有 `y` 确认删除，并取消该方向排队任务；`n` 或 Esc 取消，Enter 不确认。方向键移动图视口。底部显示所选节点的关联任务和报告 ID、方向、状态和未读标记，报告带 `report` 标记，PgUp/PgDn 滚动列表。未读与对应的 `bell` 只归接收方；节点框显示名字，选中边详情显示 `active` 数量。Esc 返回终端视图。
 
 控制端调用 `state.get` 时可传入 `graph: true`，获取 `graph.nodes` 和 `graph.edges`；同时传入 `frames: false` 可跳过终端画面。该投影不改变授权规则。
 
@@ -167,9 +167,9 @@ Agents 列表显示输出摘要、最近活动、未读、就绪状态、端点�
 | `b` | 显示或隐藏任务栏 |
 | `[` | 回看模式，使用方向键或 `j/k` 滚动；`y` 复制可见文本，`q` 退出 |
 | `t` | 打开多目标派活表单，选择投递、排队和汇报方式 |
-| `G` | 打开协作 Graph；`j/k` 选节点，Enter 单看所选 pane |
+| `G` | 打开协作 Graph；`j/k` 选节点，Enter 动作列表 |
 | `g` / `r` | 打开加边选择器／授权边列表，无需输入 ID |
-| `k` | 打开 Tasks 页：Enter 详情、`r` 重发、`x` 取消、`b` 报告 |
+| `k` | 打开 Tasks 页：Enter 动作列表（详情/重发/取消）、`r` 重发、`x` 取消、`b` 报告 |
 | `x` | 停止当前 pane，输入 `y` 确认 |
 | `R` | 原地重启已退出、失败或中断的 pane |
 | `d` / `q` | detach，保留后台会话 |
@@ -183,7 +183,7 @@ Agents 列表显示输出摘要、最近活动、未读、就绪状态、端点�
 
 输入框支持左右移动、Home/End（或 Ctrl-A/E）定位行首尾、Delete/Backspace 删除、Ctrl-U 删除到行首、Ctrl-W 删除前一个词；粘贴插入光标处。↑↓ 浏览当前输入类型的历史，历史仅在本次 TUI 中保存。任务支持 Alt-Enter 换行。提交失败时保留输入供修正。
 
-`Ctrl-a t` 打开派活表单，默认勾选当前 pane。Tab 切换字段，左右键选择选项，Space 多选目标，Enter 提交。多目标发送若部分失败，只保留未发送成功的目标，继续提交不会重复成功项。`Ctrl-a k` 打开 Tasks 页，Enter 查看完整任务与结果；详情支持滚轮和翻页，并提供以下操作：
+`Ctrl-a t` 打开派活表单，默认勾选当前 pane。Tab 切换字段，左右键选择选项，Space 多选目标，Enter 提交。多目标发送若部分失败，只保留未发送成功的目标，继续提交不会重复成功项。`Ctrl-a k` 打开 Tasks 页，Enter 打开动作列表，第一项查看完整任务与结果；详情支持滚轮和翻页，并提供以下操作：
 
 | 详情按键 | 操作 |
 |---|---|
@@ -216,11 +216,12 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 
 ### 投递与确认
 
-人类发送给 PTY 的任务默认采用 `inject`；ACP 目标采用 `prompt`。pane 内 agent 向 PTY peer 派活默认保留 `claim`，可显式指定 `--delivery inject`。已有无投递字段的 PTY 任务按 `claim` 解释。
+送达方式按目标能力选择：ACP 目标使用 `prompt`，PTY 目标使用 `push`，不再由发送方身份决定。`--delivery pull`（兼容旧名 `claim`）只对声明支持领取的 pane 可用；`inject` 作为 `push` 的兼容别名。无投递字段的排队任务按 `push` 处理。
 
 ```sh
-./bin/wtable send --delivery inject coder '检查当前修改'
-./bin/wtable send --delivery claim coder '等待主动领取的任务'
+./bin/wtable send --delivery push coder '检查当前修改'
+./bin/wtable send --delivery pull coder '等待主动领取的任务'
+./bin/wtable send --steer coder '再补跑一遍测试'
 ./bin/wtable send --queue coder '闸门允许后再发送'
 ```
 
@@ -320,6 +321,7 @@ python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.js
 python3 scripts/p0_smoke.py --binary bin/wtable --output .dev/test-results/p0.json
 python3 scripts/p1_smoke.py --binary bin/wtable --output .dev/test-results/p1.json
 python3 scripts/p2_smoke.py --binary bin/wtable --output .dev/test-results/p2.json
+python3 scripts/scheduler_smoke.py --binary bin/wtable --output .dev/test-results/scheduler.json
 python3 scripts/view_smoke.py --binary bin/wtable --output .dev/test-results/view.json
 ```
 

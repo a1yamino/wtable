@@ -822,7 +822,7 @@ func short(s string, n int) string {
 	return s
 }
 
-const help = `wtable 0.3.0 — macOS 终端 Agent 工作台
+const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
 
 启动与终端：
   wtable                                  打开 TUI，自动启动本地 daemon
@@ -850,7 +850,7 @@ const help = `wtable 0.3.0 — macOS 终端 Agent 工作台
   wtable peers                            查看当前身份可访问的接收者
   wtable send [OPTIONS] PANE PROMPT        投递任务，打印 task ID
   wtable ask [OPTIONS] PANE PROMPT         投递并等待（--timeout 默认 10m）
-    --key KEY --delivery inject|claim|prompt --queue
+    --key KEY --delivery push|steer|prompt|pull --queue --steer
     --on-complete none|notify|handoff --report-to PANE --parent TASK
   wtable next [--timeout 30s]               pane 内领取任务，输出 JSON
   wtable ack TASK                         接收 pane 确认已接手
@@ -879,8 +879,8 @@ Git 与运维：
 设置 WTABLE_HOME 可使用独立状态目录。默认使用 macOS Application Support/wtable。
 new/recruit 均接受预设、角色、账号、brief 与连线选项；--brief 默认关闭。
 new/recruit 可配置 --blocked-regex REGEX --tail-lines N --settle 400ms --verify 3s --ack-timeout 90s。
-省略送达方式时：ACP 使用 prompt，人工向 PTY 使用 inject，peer 向 PTY 使用 claim。
-PTY inject 收到任务后调用 ack/result；claim 使用 next/result；ACP turn 结束自动完成。
+省略送达方式时按目标能力选择：ACP 使用 prompt，PTY 使用 push；pull 仅用于已声明支持领取的目标。
+PTY push 收到任务后调用 ack/result；pull 使用 next/result；ACP turn 结束自动完成。
 notify 只生成报告；handoff 才派新任务。unknown 表示缺少接手证据，不自动重试。
 Ctrl-a ? 查看 TUI 快捷键。不支持远程、历史 reflow 或鼠标选区。账号仅使用已有本地配置，不自动安装或登录。
 `

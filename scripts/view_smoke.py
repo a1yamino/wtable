@@ -133,6 +133,12 @@ def run(args):
         def shown(text):
             return text in screen()
 
+        def panel_ready(name="Agents"):
+            def ready():
+                current = screen()
+                return "侧栏/内容" in current and "处理中" not in current and name in current
+            return wait_until(ready, "panel ready " + name)
+
         def send(data):
             os.write(master, data.encode() if isinstance(data, str) else data); time.sleep(.15)
 
@@ -186,18 +192,20 @@ def run(args):
         screenshot("tabs")
         record("tabs_keep_independent_layouts_focus_and_ratios_and_support_rename_switch_close")
 
-        prefix("a"); wait_until(lambda: shown("[Agents]") and not shown("处理中"), "Agents panel")
+        prefix("a"); panel_ready("Agents")
         send(b"\x1b[H\x1b[Bp"); visible("A")
         frozen_b = size("B")
         resize(120, 40); assert size("B") == frozen_b
         send("v"); wait_until(lambda: shown("最近 20 行") and shown("B_OUTPUT_34"), "background peek")
         assert not shown("B_OUTPUT_00") and size("B") == frozen_b
         screenshot("peek")
-        send(b"\x1b"); send(b"\r"); visible("B")
+        send(b"\x1b")  # close the peek overlay
+        send(b"\r"); wait_until(lambda: shown("对 B 做什么"), "pane action list")
+        send(b"\r"); visible("B")  # 打开 is the first entry
         assert size("B")[0] == 120
         record("Agents_park_and_scrollback_peek_keep_size_and_Enter_unparks_in_focus")
 
-        prefix("a"); wait_until(lambda: shown("[Agents]") and not shown("处理中"), "Agents reopened")
+        prefix("a"); panel_ready("Agents")
         send(b"\x1b[H\x1b[Bp\x1b"); visible("")
         frozen_b = size("B"); resize(120, 40)
         assert size("B") == frozen_b
@@ -219,7 +227,8 @@ def run(args):
                 break
             send("j")
         assert shown("关联任务 · C ·")
-        send(b"\r"); visible("C")
+        send(b"\r"); wait_until(lambda: shown("对 C 做什么"), "graph node action list")
+        send(b"\r"); visible("C")  # 打开 is the first entry
         assert screen().count("PEER_READY") == 1
         screenshot("graph-jump")
         record("Graph_uses_no_frames_and_Enter_unparks_selected_pane_into_focus")
@@ -243,7 +252,7 @@ def run(args):
         screenshot("blocked-attention")
         record("blocked_readiness_counts_as_waiting_and_attention_jump_opens_it")
 
-        prefix("a"); wait_until(lambda: shown("[Agents]") and not shown("处理中"), "Agents for role library")
+        prefix("a"); panel_ready("Agents")
         send("O"); wait_until(lambda: shown("角色模板库"), "role library")
         send("a"); wait_until(lambda: shown("编辑角色模板"), "role editor")
         send("view-role\tRole instructions v1\tshell\t\t" + str(root) + "\r")
@@ -251,14 +260,15 @@ def run(args):
             return next((r for r in rpc.call("preset.list")["roles"] if r["name"] == "view-role"), None)
         wait_until(lambda: role() and role()["instructions"] == "Role instructions v1", "role created")
         wait_until(lambda: shown("角色模板库") and not shown("处理中"), "role library refreshed")
-        send("e\t\x15Role instructions v2\r")
+        # Enter advances fields; tab to the last one (cwd) so it submits.
+        send("e\t\x15Role instructions v2\t\t\t\r")
         wait_until(lambda: role() and role()["instructions"] == "Role instructions v2", "role updated")
         wait_until(lambda: shown("角色模板库") and not shown("处理中"), "updated role library")
         screenshot("roles")
-        send("d"); wait_until(lambda: shown("按 y 确认"), "role delete prompt")
+        send("d"); wait_until(lambda: shown("y 确认 · n/Esc 取消"), "role delete prompt")
         send(b"\r"); assert role() is not None
         send("n"); assert role() is not None
-        send("d"); wait_until(lambda: shown("按 y 确认"), "second role delete prompt")
+        send("d"); wait_until(lambda: shown("y 确认 · n/Esc 取消"), "second role delete prompt")
         send("y"); wait_until(lambda: role() is None, "role deleted")
         record("Agents_role_library_creates_edits_and_requires_explicit_confirmation_to_delete")
         send(b"\x1b"); send(b"\x1b")
@@ -267,12 +277,13 @@ def run(args):
         prefix("f"); wait_until(lambda: shown("选择 pane"), "ACP picker")
         send(b"\x1b[F\r")
         wait_until(lambda: shown("ACP 输入") and requests and set(requests[-1].get("ids", [])) == {acp["id"]}, "ACP is sole visible pane")
-        prefix("a"); wait_until(lambda: shown("[Agents]") and not shown("处理中"), "ACP Agents panel")
+        prefix("a"); panel_ready("Agents")
         send(b"\x1b[Fp"); send(b"\x1b"); visible("")
         marker = "VIEW_HIDDEN_ACP_DRAFT_MUST_STAY_EMPTY"
         send("\x1b[200~" + marker + "\x1b[201~")
-        prefix("a"); wait_until(lambda: shown("[Agents]") and not shown("处理中"), "ACP reopen panel")
-        send(b"\x1b[F\r"); wait_until(lambda: shown("ACP 输入"), "ACP reopened")
+        prefix("a"); panel_ready("Agents")
+        send(b"\x1b[F\r"); wait_until(lambda: shown("对 acp-draft 做什么"), "ACP pane action list")
+        send(b"\r"); wait_until(lambda: shown("ACP 输入"), "ACP reopened")
         assert marker not in screen(), "paste into an empty view changed a hidden ACP draft"
         task_count = len(rpc.call("task.list"))
         send(b"\r")

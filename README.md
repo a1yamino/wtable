@@ -53,13 +53,13 @@ PTY and ACP are separate backends. Switching the same provider session between t
 
 ## Control panel and agent onboarding
 
-Press `Ctrl-a a` to open the panel. Tab / Shift-Tab switches pages, arrow keys or the wheel select rows, and Escape goes back.
+Press `Ctrl-a a` to open the panel. Tab / Shift-Tab switches pages, arrow keys or the wheel select rows, and Escape goes back. Enter or Space opens the selected row's action list; arrow keys choose an entry and Enter runs it, so page-specific letters do not have to be memorised.
 
 | Page | Actions |
 |---|---|
 | Agents | `a` add, `e` edit name/role/account, `d` remove, Enter focus, `p` park/open, `v` peek, `B` preview brief, `b` resend brief, `O` roles, `l` diagnostics, `R` restart |
 | Edges | `a` choose a source and multiple targets, `x` delete, `t` filter by the focused pane |
-| Tasks | `s` send to multiple targets, Enter details, `r` retry, `x` cancel, `b` reports |
+| Tasks | `s` send to multiple targets, Enter action list (details/retry/cancel), `r` retry, `x` cancel, `b` reports |
 | Layers | `n` create a worktree, Enter use its directory for new panes |
 
 Creation includes preset, PTY/ACP backend, directory, layer, role, account profile, brief injection, and outgoing peer links. Custom commands support quoting and escaping to group arguments but do not expand variables or execute shell syntax. Specify `/bin/zsh -lc 'command'` explicitly when a shell is needed.
@@ -137,7 +137,7 @@ Endpoint labels are `official` (default), `compatible`, or `custom`. Nonofficial
 
 Press `Ctrl-a G` to open the live graph. Arrows point from sender to recipient. Nodes in a cycle share a level; names determine order within a level. Dashed `you → pane` edges represent the human entry point and cannot be selected or deleted.
 
-Use `j/k` to select nodes and Enter to open the selected pane in focus mode. Press `e` to switch between nodes and real grant edges; `x` asks to delete the selected grant. Only `y` confirms deletion, cancelling queued tasks in that direction; `n` or Escape cancels, and Enter does not confirm. Arrow keys pan the graph. Related tasks and reports appear below with ID, direction, state, and unread status; reports carry a `report` label. Page Up/Down scrolls the list. Unread counts and their `bell` marker belong only to the recipient. Node boxes show names, and selected-edge details show the `active` count. Escape returns to the pane view.
+Use `j/k` to select nodes and Enter to open the node's action list; its first entry, 打开, focuses the pane in focus mode. Press `e` to switch between nodes and real grant edges; `x` asks to delete the selected grant. Only `y` confirms deletion, cancelling queued tasks in that direction; `n` or Escape cancels, and Enter does not confirm. Arrow keys pan the graph. Related tasks and reports appear below with ID, direction, state, and unread status; reports carry a `report` label. Page Up/Down scrolls the list. Unread counts and their `bell` marker belong only to the recipient. Node boxes show names, and selected-edge details show the `active` count. Escape returns to the pane view.
 
 The controller can request `state.get` with `graph: true` for `graph.nodes` and `graph.edges`; add `frames: false` to skip terminal frames. This projection does not change authorization.
 
@@ -157,9 +157,9 @@ Press `Ctrl-a` first, then the indicated key:
 | `b` | Show or hide the task bar |
 | `[` | Enter scrollback mode; use arrow keys or `j/k` to scroll, `y` to copy visible text, and `q` to leave |
 | `t` | Open multi-target task creation with delivery, queuing, and reporting options |
-| `G` | Open the collaboration Graph; select nodes with `j/k`, Enter to focus a pane |
+| `G` | Open the collaboration Graph; select nodes with `j/k`, Enter action list |
 | `g` / `r` | Open the add-edge picker / edge list without typing IDs |
-| `k` | Open Tasks: Enter details, `r` retry, `x` cancel, `b` reports |
+| `k` | Open Tasks: Enter action list (details/retry/cancel), `r` retry, `x` cancel, `b` reports |
 | `x` | Stop the current pane; enter `y` to confirm |
 | `R` | Restart the current exited, failed, or interrupted pane in place |
 | `d` / `q` | Detach, keeping background sessions running |
@@ -173,7 +173,7 @@ The wheel scrolls history in the pane under the pointer and returns to live outp
 
 Input dialogs support Left/Right, Home/End (or Ctrl-A/E), Delete/Backspace, Ctrl-U to delete to the start of the line, and Ctrl-W to delete the previous word. Paste inserts at the cursor. Up/Down browse history for the current input type, stored only for this TUI session. Task input supports Alt-Enter for newlines. Failed submissions keep the draft for editing.
 
-`Ctrl-a t` opens multi-target task creation, initially selecting the focused pane. Tab moves between fields, arrows choose options, Space selects targets, and Enter submits. Partial failures retain only targets that have not succeeded, so retrying the form does not duplicate successful sends. `Ctrl-a k` opens Tasks; Enter opens the full prompt/result. Details support scrolling and these actions:
+`Ctrl-a t` opens multi-target task creation, initially selecting the focused pane. Tab moves between fields, arrows choose options, Space selects targets, and Enter submits. Partial failures retain only targets that have not succeeded, so retrying the form does not duplicate successful sends. `Ctrl-a k` opens Tasks; Enter opens the action list, whose first entry shows the full prompt/result. Details support scrolling and these actions:
 
 | Detail key | Action |
 |---|---|
@@ -206,11 +206,12 @@ Links are directional. Authorize each direction separately for two-way collabora
 
 ### Delivery and acknowledgement
 
-Human-to-PTY tasks default to `inject`; ACP targets use `prompt`. Agent-to-PTY tasks retain `claim` by default and can explicitly request `--delivery inject`. Existing PTY tasks without a delivery field retain claim semantics.
+Delivery defaults follow the target's capabilities: ACP targets use `prompt`, PTY targets use `push`, and the sender no longer changes that choice. `--delivery pull` (legacy `claim`) remains available only for panes that declare pull; `inject` is accepted as an alias for `push`. Queued tasks without a delivery field are treated as `push`.
 
 ```sh
-./bin/wtable send --delivery inject coder 'Review these changes'
-./bin/wtable send --delivery claim coder 'Work to claim explicitly'
+./bin/wtable send --delivery push coder 'Review these changes'
+./bin/wtable send --delivery pull coder 'Work to claim explicitly'
+./bin/wtable send --steer coder 'Also check the tests'
 ./bin/wtable send --queue coder 'Deliver once the gate allows it'
 ```
 
@@ -307,6 +308,7 @@ python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.js
 python3 scripts/p0_smoke.py --binary bin/wtable --output .dev/test-results/p0.json
 python3 scripts/p1_smoke.py --binary bin/wtable --output .dev/test-results/p1.json
 python3 scripts/p2_smoke.py --binary bin/wtable --output .dev/test-results/p2.json
+python3 scripts/scheduler_smoke.py --binary bin/wtable --output .dev/test-results/scheduler.json
 python3 scripts/view_smoke.py --binary bin/wtable --output .dev/test-results/view.json
 ```
 
