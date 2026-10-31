@@ -96,8 +96,14 @@ def run(args):
             return next((p for p in state()["panes"] if p["name"] == name), None)
         def task(id):
             return rpc.call("task.get", {"id": id})
-        def ready_panel(title="[Agents]"):
-            return wait_until(lambda: shown(title) and not shown("处理中"), "panel ready")
+        def ready_panel(title="Agents"):
+            t = title.strip("[]")
+            return wait_until(lambda: shown("侧栏/内容") and (not t or shown(t + " ")) and not shown("处理中"), "panel ready " + t)
+
+        def ensure_panel():
+            if not shown("侧栏/内容"):
+                key("a")
+                wait_until(lambda: shown("侧栏/内容"), "panel open")
         def finish_brief(name):
             p = wait_until(lambda: (p if (p := pane(name)) and p.get("brief_task") else None), "brief created")
             wait_until(lambda: task(p["brief_task"])["state"] == "delivered", "brief injected")
@@ -108,14 +114,19 @@ def run(args):
 
         wait_until(lambda: shown("seed"), "initial TUI")
         key("a"); ready_panel()
+        presets = rpc.call("preset.list")["presets"]
+        echo_index = next(i for i, p in enumerate(presets) if p["id"] == "echo-fixture")
         for name in ["alpha", "beta", "gamma"]:
-            send("a"); wait_until(lambda: shown("添加 Agent"), "agent form")
-            send(name); tab(); send(b"\x1b[F\x1b[D")  # Last custom choice, then Echo fixture.
-            if name == "alpha":
-                tab(5); send("coder role"); tab(); send(b"\x1b[C")
-            send(b"\r")
+            ensure_panel()
+            send("a"); wait_until(lambda: shown("添加 Agent"), "preset picker")
+            send("e"); wait_until(lambda: shown("名字"), "agent form")
+            send(name)
+            tab(); send(b"\x1b[H" + b"\x1b[C" * (echo_index + 1) + b"\x1b[D")  # preset → echo fixture, fires the brief default
+            tab(5); send("coder role")                        # → role
+            tab(); send(b"\x1b[C")                           # → account: fixture-account
+            tab(3); send(b"\r")                              # → brief(auto on), connect, role_template, submit
             wait_until(lambda: pane(name) and pane(name)["state"] == "running", "created " + name)
-            ready_panel()
+            print("DIAG", name, {k: pane(name).get(k) for k in ("preset", "role", "account", "inject_brief", "brief_task")}, flush=True)
             if name != "gamma":
                 finish_brief(name)
         alpha, beta, gamma = pane("alpha"), pane("beta"), pane("gamma")
@@ -134,36 +145,37 @@ def run(args):
         wait_until(lambda: len(state()["edges"]) == 3, "third edge")
         assert {(e["from"], e["to"]) for e in state()["edges"]} == {(alpha["id"], beta["id"]), (alpha["id"], gamma["id"]), (beta["id"], gamma["id"])}
         record("panel_builds_three_directed_edges_without_typing_ids")
-        send("x"); wait_until(lambda: shown("按 y 确认"), "edge confirmation"); send(b"\r"); time.sleep(.1)
+        send("x"); wait_until(lambda: shown("y 确认"), "edge confirmation"); send(b"\r"); time.sleep(.1)
         assert len(state()["edges"]) == 3
         send("y"); wait_until(lambda: len(state()["edges"]) == 2, "edge deletion")
         record("edge_delete_requires_explicit_confirmation")
 
         tab(); ready_panel("[Tasks]"); send("s")
-        send(b"\x1b[C \x1b[C "); tab(); send("multi-pane work")
+        send(b"\x1b[C "); tab(); send("multi-pane work")
         tab(3); send(b"\x1b[C"); tab(); send(b"\x1b[F\r")
-        wait_until(lambda: shown("未完成目标保留"), "partial-send feedback")
-        children = [t for t in rpc.call("task.list") if t["prompt"] == "multi-pane work"]
-        assert len(children) == 2
-        finish_brief("gamma"); send(b"\x1b[Z\x1b[Z\x1b[C\r")  # Explicitly queue the remaining target while output settles.
-        wait_until(lambda: len([t for t in rpc.call("task.list") if t["prompt"] == "multi-pane work"]) == 3, "remaining send")
-        children = [t for t in rpc.call("task.list") if t["prompt"] == "multi-pane work"]
-        assert {t["to"] for t in children} == {alpha["id"], beta["id"], gamma["id"]}
-        assert all(t["on_complete"] == "notify" and t["report_to"] == gamma["id"] for t in children)
+        def sent_tasks():
+            return [t for t in rpc.call("task.list") if t["prompt"] == "multi-pane work"]
+        wait_until(lambda: len(sent_tasks()) >= 1, "send created tasks")
+        children = sent_tasks()
+        assert len(children) == 2, children
+        assert all(t["on_complete"] == "notify" and t["report_to"] == gamma["id"] for t in children), children
+        finish_brief("gamma")  # A busy target stays queued and drains on its own.
         for t in children:
-            wait_until(lambda: task(t["id"])["state"] == "delivered", "queued target delivery")
+            wait_until(lambda t=t: task(t["id"])["state"] == "delivered", "queued target delivery")
             rpc.call("task.done", {"id": t["id"], "result": "REPORT_ONLY_MARKER"})
-        assert len(rpc.call("report.list")) == 3
+        assert len(rpc.call("report.list")) == 2
         assert "REPORT_ONLY_MARKER" not in screen_text(rpc.call("pane.screen", {"id": gamma["id"]}))
-        record("multi_target_send_retains_only_failed_targets_and_notify_does_not_execute")
+        record("send_queues_busy_targets_and_notify_does_not_execute")
         send("b"); wait_until(lambda: shown("报告收件箱"), "report inbox"); send(b"\r")
         wait_until(lambda: shown("REPORT_ONLY_MARKER"), "report detail"); esc(); esc()
 
-        tab(); ready_panel("[Layers]"); send("n"); send("feature"); send(b"\r")
+        tab(); ready_panel("[Layers]"); send("n"); send("feature"); tab(2); send(b"\r")
         wait_until(lambda: len(state()["layers"]) == 1, "create layer"); ready_panel("[Layers]")
         layer = state()["layers"][0]
         send(b"\x1b[B\r"); tab(); ready_panel()
-        send("a"); send("delta"); tab(); send(b"\x1b[F\x1b[D\r")
+        send("a"); wait_until(lambda: shown("添加 Agent"), "preset picker")
+        send("e"); wait_until(lambda: shown("名字"), "agent form")
+        send("delta"); send(b"\r" * 11)
         wait_until(lambda: pane("delta") and pane("delta")["state"] == "running", "layer agent")
         ready_panel(); delta = pane("delta")
         assert delta["cwd"] == layer["path"] and delta["layer"] == layer["path"]
@@ -175,7 +187,7 @@ def run(args):
             path = root / (p["id"] + ".input")
             return path.exists() and marker in path.read_text()
         wait_until(lambda: received(beta, "FOCUS_BEFORE"), "focus beta input")
-        key("a"); ready_panel(); send("d"); wait_until(lambda: shown("按 y 确认"), "remove confirmation")
+        key("a"); ready_panel(); send("d"); wait_until(lambda: shown("y 确认"), "remove confirmation")
         send(b"\r"); time.sleep(.1); assert pane("seed") is not None
         send("y"); wait_until(lambda: pane("seed") is None, "seed removal"); ready_panel(); esc()
         send("FOCUS_AFTER\r"); wait_until(lambda: received(beta, "FOCUS_AFTER"), "focus preserved input")
@@ -189,10 +201,13 @@ def run(args):
         (home / "accounts.json").write_text(json.dumps(account))
         record("missing_account_is_not_silently_replaced")
 
-        key("a"); ready_panel(); send("a"); send("chat"); tab()
+        key("a"); ready_panel(); send("a"); wait_until(lambda: shown("添加 Agent"), "preset picker")
+        send("e"); wait_until(lambda: shown("名字"), "agent form")
+        send("chat")
         catalog = rpc.call("preset.list")
         acp_index = next(i for i, p in enumerate(catalog["presets"]) if p["id"] == "acp-fixture")
-        send(b"\x1b[H" + b"\x1b[C" * acp_index + b"\r")
+        tab(); send(b"\x1b[H" + b"\x1b[C" * acp_index)
+        tab(9); send(b"\r")
         wait_until(lambda: pane("chat") and pane("chat")["state"] == "running", "ACP create"); ready_panel()
         chat = pane("chat"); wait_until(lambda: task(chat["brief_task"])["state"] == "completed", "ACP brief completion")
         send(b"\r"); wait_until(lambda: shown("ACP 输入"), "persistent ACP composer")

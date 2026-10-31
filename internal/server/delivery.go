@@ -17,11 +17,68 @@ import (
 func activeState(state string) bool {
 	return contains([]string{"running", "delivered", "accepted", "cancelling"}, state)
 }
+
+// taskMode normalises the stored delivery value. Older records used inject and
+// claim; both are still readable, they just map onto the current names.
 func taskMode(t model.Task) string {
-	if t.DeliveryMode == "" {
-		return "claim"
+	switch t.DeliveryMode {
+	case "", "claim", "pull":
+		if t.DeliveryMode == "" {
+			return "push"
+		}
+		return "pull"
+	case "inject":
+		return "push"
+	default:
+		return t.DeliveryMode
 	}
-	return t.DeliveryMode
+}
+
+// resolveDelivery turns a requested mode (or auto) into a concrete one and
+// checks it against what the pane declared it can receive.
+func resolveDelivery(p *model.Pane, mode string) (string, error) {
+	caps := p.EffectiveCaps()
+	if !caps.ReceiveTasks {
+		return "", errors.New("recipient does not accept task delivery")
+	}
+	switch mode {
+	case "", "auto":
+		switch {
+		case caps.Prompt:
+			mode = "prompt"
+		case caps.PushIdle:
+			mode = "push"
+		case caps.Pull:
+			mode = "pull"
+		default:
+			return "", errors.New("recipient does not accept task delivery")
+		}
+	case "inject":
+		mode = "push"
+	case "claim":
+		mode = "pull"
+	}
+	switch mode {
+	case "push":
+		if !caps.PushIdle {
+			return "", errors.New("recipient does not accept push delivery")
+		}
+	case "steer":
+		if !caps.PushSteer {
+			return "", errors.New("recipient does not accept steering")
+		}
+	case "prompt":
+		if p.Backend != "acp" || !caps.Prompt {
+			return "", errors.New("delivery_mode 与目标 backend 不兼容")
+		}
+	case "pull":
+		if !caps.Pull {
+			return "", errors.New("recipient does not accept pull delivery")
+		}
+	default:
+		return "", errors.New("未知的 delivery_mode")
+	}
+	return mode, nil
 }
 func (s *Server) inputLane(id string) *sync.Mutex {
 	v, _ := s.inputLanes.LoadOrStore(id, &sync.Mutex{})
@@ -62,7 +119,7 @@ func frameLines(f model.Frame) []string {
 	}
 	return lines
 }
-func (s *Server) readyLocked(p *model.Pane) error {
+func (s *Server) readyLocked(p *model.Pane, allowBusy bool) error {
 	term := s.terminals[p.ID]
 	if p.State != "running" || term == nil {
 		return errors.New("not-ready: pane 进程未运行")
@@ -87,9 +144,11 @@ func (s *Server) readyLocked(p *model.Pane) error {
 	if time.Since(last) < time.Duration(c.SettleMS)*time.Millisecond {
 		return errors.New("not-ready: 等待终端输出稳定")
 	}
-	for _, t := range s.state.Tasks {
-		if t.To == p.ID && taskMode(t) == "inject" && (t.State == "delivered" || t.State == "accepted" || t.State == "cancelling") {
-			return fmt.Errorf("busy:%s；用 --queue 显式排队", t.ID)
+	if !allowBusy {
+		for _, t := range s.state.Tasks {
+			if t.To == p.ID && (taskMode(t) == "push" || taskMode(t) == "steer") && activeState(t.State) {
+				return fmt.Errorf("busy:%s", t.ID)
+			}
 		}
 	}
 	return nil
@@ -97,6 +156,14 @@ func (s *Server) readyLocked(p *model.Pane) error {
 func taskEnvelope(t model.Task) string {
 	return fmt.Sprintf("[WTABLE TASK %s]\n%s\n[WTABLE END %s]\nAccept this task with: \"$WTABLE_CLI\" ack %s\nWhen finished, submit the full result with: \"$WTABLE_CLI\" result %s <result>\nDo not print credentials.\n", t.ID, t.Prompt, t.ID, t.ID, t.ID)
 }
+// steerEnvelope marks text as an addition to the running turn, not a new task.
+func steerEnvelope(t model.Task, active string) string {
+	if active == "" {
+		active = "当前任务"
+	}
+	return fmt.Sprintf("[WTABLE STEER %s vs %s]\n%s\n[WTABLE STEER END %s]\n这是对 %s 的追加要求，不要开始新任务。无法在本轮内处理就只输出一行：defer %s\n处理了就用 \"$WTABLE_CLI\" result %s <结果> 收尾（不要打印凭据）。\n", t.ID, active, t.Prompt, t.ID, active, t.ID, t.ID)
+}
+
 func (s *Server) deliverTask(id string) {
 	s.mu.Lock()
 	t := s.taskLocked(id)
@@ -114,7 +181,11 @@ func (s *Server) deliverTask(id string) {
 func (s *Server) deliverInLane(id string, prechecked bool) error {
 	s.mu.Lock()
 	t := s.taskLocked(id)
-	if t == nil || t.State != "queued" || taskMode(*t) != "inject" || s.storeErr != nil || s.ctx.Err() != nil {
+	mode := ""
+	if t != nil {
+		mode = taskMode(*t)
+	}
+	if t == nil || t.State != "queued" || (mode != "push" && mode != "steer") || s.storeErr != nil || s.ctx.Err() != nil {
 		s.mu.Unlock()
 		return errors.New("任务不能投递：状态已改变或服务不可用")
 	}
@@ -133,9 +204,16 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 		s.mu.Unlock()
 		return errors.New("任务不能投递：状态已改变或服务不可用")
 	}
-	if err := s.readyLocked(p); err != nil && !prechecked {
-		if t.DeliveryError != err.Error() {
+	mode = taskMode(*t)
+	allowBusy := mode == "steer"
+	if allowBusy && !s.paneBusyLocked(p.ID) {
+		s.mu.Unlock()
+		return errors.New("not-ready: 目标没有正在进行的 turn，steer 不适用")
+	}
+	if err := s.readyLocked(p, allowBusy); err != nil && !prechecked {
+		if t.DeliveryError != err.Error() || t.QueueReason != err.Error() {
 			t.DeliveryError = err.Error()
+			t.QueueReason = err.Error()
 			t.UpdatedAt = time.Now()
 			s.saveLocked()
 		}
@@ -145,9 +223,25 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 	term := s.terminals[p.ID]
 	config := deliveryConfig(p)
 	before := frameLines(term.Snapshot(0))
+	active := ""
+	if mode == "steer" {
+		for i := range s.state.Tasks {
+			if other := &s.state.Tasks[i]; other.To == p.ID && other.ID != t.ID && activeState(other.State) {
+				active = other.ID
+				break
+			}
+		}
+	}
 	envelope := taskEnvelope(*t)
+	if mode == "steer" {
+		envelope = steerEnvelope(*t, active)
+	}
 	data := envelope
-	if term.Snapshot(0).BracketedPaste {
+	if mode == "steer" {
+		// Steering is one physical line: the prefix still tells the agent that
+		// this is an addition, and no instruction becomes a second command.
+		data = strings.ReplaceAll(envelope, "\n", " ") + "\r"
+	} else if term.Snapshot(0).BracketedPaste {
 		data = "\x1b[200~" + strings.TrimSuffix(envelope, "\n") + "\x1b[201~\r"
 	} else {
 		// One physical line is one submission. JSON retains prompt newlines without
@@ -166,6 +260,8 @@ func (s *Server) deliverInLane(id string, prechecked bool) error {
 	t.UpdatedAt = now
 	t.DeliveryStatus = "verifying"
 	t.DeliveryError = ""
+	t.DeliveredVia = mode
+	t.QueueReason = ""
 	// Persist before IO: a crash may leave an unknown outcome, never a replayable queue entry.
 	if err := s.saveLocked(); err != nil {
 		s.mu.Unlock()
@@ -255,16 +351,29 @@ func (s *Server) deliveryLoop() {
 			s.mu.Unlock()
 			continue
 		}
-		var queued []string
+		var wakePanes []string
 		changed := false
 		for i := range s.state.Tasks {
 			t := &s.state.Tasks[i]
-			if t.State == "queued" && taskMode(*t) == "inject" {
-				queued = append(queued, t.ID)
+			if t.State == "queued" && (taskMode(*t) == "push" || taskMode(*t) == "steer" || taskMode(*t) == "prompt") {
+				wakePanes = append(wakePanes, t.To)
 			}
-			if t.State == "delivered" && taskMode(*t) == "inject" && t.DeliveredAt != nil {
+			if t.State == "delivered" && (taskMode(*t) == "push" || taskMode(*t) == "steer") && t.DeliveredAt != nil {
 				p := s.paneLocked(t.To)
 				if p != nil && time.Since(*t.DeliveredAt) >= time.Duration(deliveryConfig(p).AckTimeoutMS)*time.Millisecond {
+					if taskMode(*t) == "steer" && t.SteerOf == "" {
+						// One silent steer falls back to the normal queue instead of
+						// being retried as another interruption.
+						t.SteerOf = t.ID
+						t.State = "queued"
+						t.DeliveryMode = "push"
+						t.DeliveredAt = nil
+						t.DeliveryStatus = ""
+						t.QueueReason = "steer_expired: 未确认插入，已改为普通排队"
+						t.UpdatedAt = time.Now()
+						changed = true
+						continue
+					}
 					t.State = "unknown"
 					t.DeliveryError = "ack_timeout: 未收到 ack 或 result，不会自动重投"
 					t.UpdatedAt = time.Now()
@@ -278,17 +387,18 @@ func (s *Server) deliveryLoop() {
 			s.saveLocked()
 		}
 		s.mu.Unlock()
-		for _, id := range queued {
-			s.deliverTask(id)
+		for _, paneID := range wakePanes {
+			s.wake(paneID)
 		}
 	}
 }
 func (s *Server) acceptACP(paneID, runID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.runs[paneID] != runID || s.closing {
+		s.mu.Unlock()
 		return
 	}
+	accepted := false
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
 		if t.To == paneID && t.State == "delivered" && t.DeliveryMode == "prompt" {
@@ -297,7 +407,12 @@ func (s *Server) acceptACP(paneID, runID string) {
 			t.AcceptedAt = &now
 			t.UpdatedAt = now
 			s.saveLocked()
-			return
+			accepted = true
+			break
 		}
+	}
+	s.mu.Unlock()
+	if accepted {
+		s.wake(paneID)
 	}
 }

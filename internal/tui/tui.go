@@ -455,6 +455,9 @@ func (u *ui) key(e *tcell.EventKey) bool {
 		u.prefix = true
 		return false
 	}
+	if u.navKey(e) {
+		return false
+	}
 	p := u.current()
 	if p == nil {
 		return false

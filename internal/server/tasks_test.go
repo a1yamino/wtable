@@ -37,7 +37,7 @@ func TestCompletionReportPreservesSenderGrant(t *testing.T) {
 	s := taskTestServer(t)
 	s.state.Panes = []model.Pane{{ID: "worker", Backend: "pty", State: "running"}, {ID: "inbox", Backend: "pty", State: "running"}}
 	s.state.Edges = []model.Edge{{From: "sender", To: "worker"}, {From: "sender", To: "inbox"}}
-	task, err := s.sendTask("sender", rawTask(model.SendParams{To: "worker", Prompt: "work", ReportTo: "inbox"}))
+	task, err := s.sendTask("sender", rawTask(model.SendParams{To: "worker", Prompt: "work", DeliveryMode: "pull", ReportTo: "inbox"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,19 +106,31 @@ func TestPTYGateVerificationAndCancellation(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	time.Sleep(20 * time.Millisecond)
-	if _, err := s.sendTask("controller", rawTask(model.SendParams{To: "pty", Prompt: "must not arrive"})); err == nil || !strings.HasPrefix(err.Error(), "blocked:") {
-		t.Fatalf("gate did not block: %v", err)
+	blocked, err := s.sendTask("controller", rawTask(model.SendParams{To: "pty", Prompt: "echo only"}))
+	if err != nil {
+		t.Fatalf("blocked delivery must queue instead of failing the send: %v", err)
 	}
-	if len(s.state.Tasks) != 0 {
-		t.Fatal("rejected delivery created task")
+	if blocked.State != "queued" || !strings.HasPrefix(blocked.QueueReason, "blocked:") {
+		t.Fatalf("blocked gate must report a queue reason: %+v", blocked)
 	}
 	s.state.Panes[0].DeliveryConfig.BlockedRegex = ""
-	task, err := s.sendTask("controller", rawTask(model.SendParams{To: "pty", Prompt: "echo only"}))
-	if err != nil {
-		t.Fatal(err)
+	s.wake("pty")
+	var task model.Task
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		cur := s.taskLocked(blocked.ID)
+		if cur != nil {
+			task = *cur
+		}
+		s.mu.Unlock()
+		if task.State == "delivered" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if task.State != "delivered" {
-		t.Fatalf("not delivered: %+v", task)
+		t.Fatalf("unblocked task did not deliver: %+v", task)
 	}
 	time.Sleep(80 * time.Millisecond)
 	s.mu.Lock()

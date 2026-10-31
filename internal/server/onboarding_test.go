@@ -181,7 +181,7 @@ func TestSpawnValidationAndBriefQueueRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.BriefTask == "" || len(s.state.Tasks) != 1 || s.state.Tasks[0].State != "queued" || s.state.Tasks[0].DeliveryMode != "inject" {
+	if p.BriefTask == "" || len(s.state.Tasks) != 1 || s.state.Tasks[0].State != "queued" || s.state.Tasks[0].DeliveryMode != "push" {
 		t.Fatalf("brief bypassed queue: %+v %+v", p, s.state.Tasks)
 	}
 	s.mu.Lock()

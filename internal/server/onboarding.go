@@ -311,7 +311,7 @@ func (s *Server) paneBrief(ref string, send bool) (any, error) {
 	task, err := s.enqueueBriefLocked(p, text)
 	s.mu.Unlock()
 	if err == nil && task.DeliveryMode == "prompt" {
-		go s.runQueue(task.To)
+		s.wake(task.To)
 	}
 	return task, err
 }

@@ -70,6 +70,12 @@ type controlPanel struct {
 	roleView                                                   bool
 	roleChanged                                                bool
 	layerReturn                                                []panelField
+	presetCursor                                               int
+	fastCreate                                                 bool
+	focusSide                                                  bool
+	sideRows                                                   map[int]int
+	fieldRows                                                  map[int]int
+	confirmCancelRow                                           int
 }
 type panelResult struct {
 	owner  *controlPanel
@@ -172,7 +178,13 @@ func (u *ui) panelFinished(r panelResult) {
 			}
 		}
 		r.owner.form = ""
-		u.status = "已保存 Agent：" + pane.Name
+		if r.owner.fastCreate {
+			r.owner.fastCreate = false
+			u.panel = nil
+			u.status = "已创建 " + pane.Name + "（Alt+数字 直达，Ctrl-a a 可再调）"
+		} else {
+			u.status = "已保存 Agent：" + pane.Name
+		}
 	case "role.put", "role.delete":
 		r.owner.form = ""
 		r.owner.confirmKind = ""
@@ -404,6 +416,10 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 		}
 		return
 	}
+	if p.form == "preset" {
+		u.presetFormKey(e)
+		return
+	}
 	if p.form != "" {
 		u.panelFormKey(e)
 		return
@@ -424,6 +440,35 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 		p.tab = (p.tab + step + len(panelTabs)) % len(panelTabs)
 		p.selected = 0
 		return
+	}
+	switch e.Key() {
+	case tcell.KeyLeft:
+		p.focusSide = true
+		return
+	case tcell.KeyRight:
+		p.focusSide = false
+		return
+	}
+	if p.focusSide {
+		switch e.Key() {
+		case tcell.KeyUp:
+			p.tab = (p.tab + len(panelTabs) - 1) % len(panelTabs)
+			p.selected = 0
+			return
+		case tcell.KeyDown:
+			p.tab = (p.tab + 1) % len(panelTabs)
+			p.selected = 0
+			return
+		case tcell.KeyEnter:
+			p.focusSide = false
+			return
+		case tcell.KeyEscape:
+			u.panel = nil
+			return
+		default:
+			// 其他按键直接作用于内容区，并把焦点交回去，避免"按键没反应"。
+			p.focusSide = false
+		}
 	}
 	switch e.Key() {
 	case tcell.KeyUp:
@@ -448,7 +493,7 @@ func (u *ui) panelKey(e *tcell.EventKey) {
 			return
 		}
 		if e.Str() == "a" {
-			u.startAgentForm(false)
+			u.startPresetPicker()
 			return
 		}
 		if len(u.snapshot.Panes) == 0 {
@@ -580,9 +625,30 @@ func (u *ui) panelFormKey(e *tcell.EventKey) {
 		return
 	}
 	f := &p.fields[p.field]
+	// ↑↓ move between fields (options already use ←→ for their value), so the
+	// whole form is reachable without Tab.
+	switch e.Key() {
+	case tcell.KeyDown:
+		p.field = (p.field + 1) % len(p.fields)
+		return
+	case tcell.KeyUp:
+		p.field = (p.field + len(p.fields) - 1) % len(p.fields)
+		return
+	}
 	if e.Key() == tcell.KeyEnter {
-		if (f.key == "prompt" || f.key == "instructions") && e.Modifiers()&tcell.ModAlt != 0 {
+		multiline := f.key == "prompt" || f.key == "instructions"
+		if multiline && e.Modifiers()&tcell.ModAlt != 0 {
 			f.edit.Insert("\n")
+			return
+		}
+		if e.Modifiers()&tcell.ModCtrl != 0 || e.Modifiers()&tcell.ModAlt != 0 {
+			u.submitPanelForm()
+			return
+		}
+		// Enter advances; only the last field submits, so a half-filled form
+		// cannot be sent by accident.
+		if p.field < len(p.fields)-1 {
+			p.field++
 			return
 		}
 		u.submitPanelForm()
@@ -798,4 +864,183 @@ func parseArgv(input string) ([]string, error) {
 		return nil, fmt.Errorf("请输入可执行命令")
 	}
 	return args, nil
+}
+
+// startPresetPicker is the fast path: pick what to run, press Enter, done.
+// Everything else (name, dir, layer, account, role, edges) has a sane default
+// and can still be changed in the advanced form behind e / Tab.
+func (u *ui) startPresetPicker() {
+	p := u.panel
+	p.form = "preset"
+	p.field = 0
+	p.presetCursor = 0
+	p.preview = ""
+	p.presetCursor = 0
+}
+
+func (u *ui) presetEntries() []model.Preset {
+	p := u.panel
+	entries := []model.Preset{}
+	for _, preset := range p.catalog.Presets {
+		entries = append(entries, preset)
+	}
+	return entries
+}
+
+// presetOrder lists preset indices as displayed: usable ones first, then the
+// ones that need installing, so the cursor and the screen never disagree.
+func (u *ui) presetOrder() []int {
+	entries := u.presetEntries()
+	order := []int{}
+	for i, preset := range entries {
+		if preset.Available {
+			order = append(order, i)
+		}
+	}
+	for i, preset := range entries {
+		if !preset.Available {
+			order = append(order, i)
+		}
+	}
+	return order
+}
+
+func (u *ui) presetFormKey(e *tcell.EventKey) {
+	p := u.panel
+	entries := u.presetEntries()
+	order := u.presetOrder()
+	count := len(entries) + 1 // +1: 自定义命令
+	switch e.Key() {
+	case tcell.KeyEscape:
+		p.form = ""
+		return
+	case tcell.KeyUp:
+		p.presetCursor = max(0, p.presetCursor-1)
+		return
+	case tcell.KeyDown:
+		p.presetCursor = min(count-1, p.presetCursor+1)
+		return
+	case tcell.KeyHome:
+		p.presetCursor = 0
+		return
+	case tcell.KeyEnd:
+		p.presetCursor = count - 1
+		return
+	}
+	switch e.Str() {
+	case "k":
+		p.presetCursor = max(0, p.presetCursor-1)
+		return
+	case "j":
+		p.presetCursor = min(count-1, p.presetCursor+1)
+		return
+	case "e":
+		u.advancedAgentForm()
+		return
+	case "c":
+		u.advancedAgentForm()
+		p.get("preset").choice = len(p.get("preset").options) - 1
+		return
+	}
+	if e.Key() == tcell.KeyTab || e.Key() == tcell.KeyEnter {
+		if p.presetCursor >= len(order) {
+			u.advancedAgentForm()
+			p.get("preset").choice = len(p.get("preset").options) - 1
+			return
+		}
+		preset := entries[order[p.presetCursor]]
+		if !preset.Available {
+			u.status = preset.Name + " 不可用：" + preset.Detail
+			return
+		}
+		u.createFromPreset(preset)
+	}
+}
+
+// advancedAgentForm switches from the picker to the full form, keeping the
+// highlighted preset so nobody has to pick it twice.
+func (u *ui) advancedAgentForm() {
+	cursor := u.panel.presetCursor
+	u.startAgentForm(false)
+	if f := u.panel.get("preset"); f != nil {
+		if cursor >= 0 && cursor < len(f.options) {
+			f.choice = cursor
+		}
+	}
+	u.applyPresetDefaults()
+}
+
+// applyPresetDefaults keeps backend / brief in step with the chosen preset.
+func (u *ui) applyPresetDefaults() {
+	p := u.panel
+	f := p.get("preset")
+	if f == nil {
+		return
+	}
+	id := f.value()
+	for _, preset := range p.catalog.Presets {
+		if preset.ID != id {
+			continue
+		}
+		if b := p.get("backend"); b != nil {
+			b.choice = 0
+			if preset.Backend == "acp" {
+				b.choice = 1
+			}
+		}
+		if b := p.get("brief"); b != nil {
+			b.choice = 0
+			if preset.ID != "shell" {
+				b.choice = 1
+			}
+		}
+		break
+	}
+}
+
+// autoAgentName derives a readable, unique name from the preset id.
+func (u *ui) autoAgentName(presetID string) string {
+	base := strings.TrimSuffix(strings.TrimSuffix(presetID, "-pty"), "-acp")
+	if base == "" {
+		base = "agent"
+	}
+	taken := map[string]bool{}
+	for _, pane := range u.snapshot.Panes {
+		taken[pane.Name] = true
+	}
+	if !taken[base] {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s#%d", base, i)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+}
+
+// createFromPreset applies defaults and spawns immediately.
+func (u *ui) createFromPreset(preset model.Preset) {
+	cwd := u.activeCwd
+	if cwd == "" {
+		cwd = u.cwd
+	}
+	connect := []string{}
+	if current := u.current(); current != nil {
+		connect = append(connect, current.ID)
+	}
+	args := model.SpawnParams{
+		Name:        u.autoAgentName(preset.ID),
+		Preset:      preset.ID,
+		Backend:     preset.Backend,
+		Cwd:         cwd,
+		Layer:       u.activeLayer,
+		InjectBrief: preset.ID != "shell",
+		ConnectTo:   connect,
+		Cols:        80,
+		Rows:        24,
+	}
+	u.panel.form = ""
+	u.panel.fastCreate = true
+	u.panelAsync("pane.spawn", args)
 }

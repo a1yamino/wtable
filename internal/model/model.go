@@ -42,6 +42,29 @@ type Message struct {
 	At   time.Time `json:"at"`
 }
 
+// PaneCaps is what a pane declares it can receive. The zero value means
+// "derive from the backend", so older state files keep working.
+type PaneCaps struct {
+	ReceiveTasks  bool   `json:"receive_tasks"`
+	ReturnResults bool   `json:"return_results"`
+	PushIdle      bool   `json:"push_idle"`
+	PushSteer     bool   `json:"push_steer"`
+	Prompt        bool   `json:"prompt"`
+	Pull          bool   `json:"pull"`
+	Source        string `json:"source,omitempty"` // preset, user or probe
+}
+
+// EffectiveCaps returns the declared caps or the backend default.
+func (p *Pane) EffectiveCaps() PaneCaps {
+	if p.Caps != nil {
+		return *p.Caps
+	}
+	if p.Backend == "acp" {
+		return PaneCaps{ReceiveTasks: true, ReturnResults: true, Prompt: true, Source: "backend"}
+	}
+	return PaneCaps{ReceiveTasks: true, ReturnResults: true, PushIdle: true, Pull: true, Source: "backend"}
+}
+
 // DeliveryConfig controls the heuristic PTY gate; zero values select defaults.
 type DeliveryConfig struct {
 	BlockedRegex string `json:"blocked_regex,omitempty"`
@@ -109,6 +132,7 @@ type Pane struct {
 	Messages         []Message      `json:"messages,omitempty"`
 	Frame            *Frame         `json:"frame,omitempty"`
 	DeliveryConfig   DeliveryConfig `json:"delivery_config,omitempty"`
+	Caps             *PaneCaps      `json:"caps,omitempty"`
 }
 
 type Edge struct {
@@ -160,19 +184,26 @@ type Task struct {
 	Seen           bool       `json:"seen"`
 	Result         string     `json:"result,omitempty"`
 	DedupeKey      string     `json:"dedupe_key,omitempty"`
+	IdempotencyKey string     `json:"idempotency_key,omitempty"`
+	QueueReason    string     `json:"queue_reason,omitempty"`
+	DeliveredVia   string     `json:"delivered_via,omitempty"`
+	SteerOf        string     `json:"steer_of,omitempty"`
+	ResultPushed   bool       `json:"result_pushed,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 type SendParams struct {
-	To           string `json:"to"`
-	Prompt       string `json:"prompt"`
-	DedupeKey    string `json:"dedupe_key,omitempty"`
-	DeliveryMode string `json:"delivery_mode,omitempty"`
-	Queue        bool   `json:"queue,omitempty"`
-	OnComplete   string `json:"on_complete,omitempty"`
-	ReportTo     string `json:"report_to,omitempty"`
-	ParentTask   string `json:"parent_task,omitempty"`
+	To             string `json:"to"`
+	Prompt         string `json:"prompt"`
+	DedupeKey      string `json:"dedupe_key,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	DeliveryMode   string `json:"delivery_mode,omitempty"`
+	Queue          bool   `json:"queue,omitempty"`
+	OnComplete     string `json:"on_complete,omitempty"`
+	ReportTo       string `json:"report_to,omitempty"`
+	ParentTask     string `json:"parent_task,omitempty"`
+	Steer          bool   `json:"steer,omitempty"`
 }
 
 type Report struct {

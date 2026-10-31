@@ -82,7 +82,7 @@ func (s *Server) completeReportLocked(t *model.Task) {
 			r.HandoffTask = next.ID
 			s.state.Tasks = append(s.state.Tasks, next)
 			if mode == "prompt" {
-				go s.runQueue(next.To)
+				s.wake(next.To)
 			}
 		}
 	}
@@ -156,7 +156,8 @@ func (s *Server) taskMark(principal, method string, raw json.RawMessage) (any, e
 		if t.State == "accepted" {
 			return *t, nil
 		}
-		if taskMode(*t) != "inject" || (t.State != "delivered" && t.State != "unknown") {
+		mode := taskMode(*t)
+		if (mode != "push" && mode != "steer" && mode != "pull") || (t.State != "delivered" && t.State != "unknown") {
 			return nil, errors.New("只有已注入或未知的任务可以 ack")
 		}
 		now := time.Now()
@@ -168,7 +169,8 @@ func (s *Server) taskMark(principal, method string, raw json.RawMessage) (any, e
 		if principal != "controller" {
 			return nil, deniedError("人工确认需要控制端")
 		}
-		if taskMode(*t) != "inject" || (t.State != "delivered" && t.State != "unknown") {
+		mode := taskMode(*t)
+		if (mode != "push" && mode != "steer" && mode != "pull") || (t.State != "delivered" && t.State != "unknown") {
 			return nil, errors.New("任务当前不能确认投递")
 		}
 		t.DeliveryStatus = "submitted"
@@ -209,24 +211,15 @@ func (s *Server) retryTask(raw json.RawMessage) (any, error) {
 	// Retrying preserves the original sender's grants; a controller cannot
 	// accidentally elevate an agent's report/handoff authorization.
 	params := model.SendParams{To: a.To, Prompt: old.Prompt, DeliveryMode: old.DeliveryMode, Queue: a.Queue, OnComplete: old.OnComplete, ReportTo: old.ReportTo, ParentTask: old.ParentTask}
-	if params.DeliveryMode == "" {
-		params.DeliveryMode = "claim"
-	}
-	if p := s.paneLocked(a.To); p != nil && p.Backend == "acp" {
-		params.DeliveryMode = "prompt"
-	} else if params.DeliveryMode == "prompt" {
-		params.DeliveryMode = "inject"
-	}
-	s.mu.Unlock()
-	laneID := params.To
-	s.mu.Lock()
-	if p := s.paneLocked(laneID); p != nil {
-		laneID = p.ID
+	if p := s.paneLocked(a.To); p != nil {
+		mode, err := resolveDelivery(p, params.DeliveryMode)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		params.DeliveryMode = mode
 	}
 	s.mu.Unlock()
-	lane := s.inputLane(laneID)
-	lane.Lock()
-	defer lane.Unlock()
 	s.mu.Lock()
 	original = s.taskLocked(old.ID)
 	priorTask := *original
@@ -254,15 +247,6 @@ func (s *Server) retryTask(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if t.DeliveryMode == "inject" && !a.Queue {
-		if err := s.deliverInLane(t.ID, true); err != nil {
-			return t, err
-		}
-		s.mu.Lock()
-		t = *s.taskLocked(t.ID)
-		s.mu.Unlock()
-	} else if t.DeliveryMode == "prompt" {
-		go s.runQueue(t.To)
-	}
-	return t, nil
+	s.wake(t.To)
+	return s.awaitFirstHop(t.ID, 1200*time.Millisecond), nil
 }

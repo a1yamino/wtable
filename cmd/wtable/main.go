@@ -305,8 +305,9 @@ func run(args []string) error {
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
 		key := fs.String("key", "", "任务去重键")
-		delivery := fs.String("delivery", "", "inject、claim 或 prompt（省略时由服务端选择）")
+		delivery := fs.String("delivery", "", "push、steer、prompt 或 pull（省略时按目标能力选择）")
 		queue := fs.Bool("queue", false, "目标忙时显式排队")
+		steer := fs.Bool("steer", false, "作为当前 turn 的追加要求插入（需目标声明支持）")
 		onComplete := fs.String("on-complete", "", "none、notify 或 handoff")
 		reportTo := fs.String("report-to", "", "结果回传目标 pane")
 		parentTask := fs.String("parent", "", "关联的父任务 ID")
@@ -318,10 +319,14 @@ func run(args []string) error {
 		if len(rest) < 2 {
 			return fmt.Errorf("用法：wtable %s [--key KEY] <pane> <prompt>", args[0])
 		}
+		mode := *delivery
+		if *steer {
+			mode = "steer"
+		}
 		var t model.Task
 		if err = call("task.send", model.SendParams{
 			To: rest[0], Prompt: strings.Join(rest[1:], " "), DedupeKey: *key,
-			DeliveryMode: *delivery, Queue: *queue, OnComplete: *onComplete, ReportTo: *reportTo, ParentTask: *parentTask,
+			DeliveryMode: mode, Queue: *queue, OnComplete: *onComplete, ReportTo: *reportTo, ParentTask: *parentTask,
 		}, &t); err != nil {
 			return err
 		}
@@ -347,27 +352,28 @@ func run(args []string) error {
 	case "next":
 		fs := flag.NewFlagSet("next", flag.ContinueOnError)
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
-		timeout := fs.Duration("timeout", 0, "等待新任务的时限")
+		timeout := fs.Duration("timeout", 30*time.Second, "阻塞等待新任务的时限；0 表示立即返回")
 		if err = fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		deadline := time.Now().Add(*timeout)
-		for {
-			var t *model.Task
-			if err = call("task.next", nil, &t); err != nil {
-				return err
-			}
-			if t != nil {
-				return printJSON(t)
-			}
-			if time.Now().After(deadline) {
+		var t *model.Task
+		if err = call("task.next", map[string]any{"timeout_ms": timeout.Milliseconds()}, &t); err != nil {
+			return err
+		}
+		if t == nil {
+			if jsonMode {
 				fmt.Println("null")
 				return nil
 			}
-			if err = pause(ctx, 150*time.Millisecond); err != nil {
-				return err
-			}
+			fmt.Println("null")
+			return nil
 		}
+		if jsonMode {
+			return printJSON(t)
+		}
+		fmt.Println(t.ID)
+		fmt.Println(t.Prompt)
+		return nil
 	case "result":
 		fs := flag.NewFlagSet("result", flag.ContinueOnError)
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
@@ -402,7 +408,8 @@ func run(args []string) error {
 		if len(fs.Args()) != 1 {
 			return errors.New("用法：wtable wait [--timeout 10m] <task-id>")
 		}
-		t, err := waitTask(ctx, c, fs.Args()[0], *timeout)
+		var t model.Task
+		err = call("task.wait", map[string]any{"id": fs.Args()[0], "timeout_ms": timeout.Milliseconds()}, &t)
 		if err != nil {
 			return err
 		}
@@ -575,8 +582,11 @@ func run(args []string) error {
 
 // paneCommand preserves omitted metadata fields when editing a pane.
 func paneCommand(args []string, call func(string, any, any) error) error {
+	if len(args) > 0 && args[0] == "caps" {
+		return paneCaps(args[1:], call)
+	}
 	if len(args) == 0 || args[0] != "edit" {
-		return errors.New("用法：wtable pane edit [--name NAME] [--role TEXT] [--account NAME] PANE")
+		return errors.New("用法：wtable pane edit [...] 或 wtable pane caps PANE key=value...")
 	}
 	fs := flag.NewFlagSet("pane edit", flag.ContinueOnError)
 	name := fs.String("name", "", "pane 名称")
@@ -874,3 +884,53 @@ PTY inject 收到任务后调用 ack/result；claim 使用 next/result；ACP tur
 notify 只生成报告；handoff 才派新任务。unknown 表示缺少接手证据，不自动重试。
 Ctrl-a ? 查看 TUI 快捷键。不支持远程、历史 reflow 或鼠标选区。账号仅使用已有本地配置，不自动安装或登录。
 `
+
+// paneCaps sets one or more capability flags, e.g.
+// wtable pane caps p-1 inject_steer=true pull=false
+func paneCaps(args []string, call func(string, any, any) error) error {
+	if len(args) < 2 {
+		return errors.New("用法：wtable pane caps PANE receive_tasks=true push=true steer=true prompt=false pull=true")
+	}
+	var state model.Snapshot
+	if err := call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+		return err
+	}
+	var current *model.Pane
+	for i := range state.Panes {
+		if state.Panes[i].ID == args[0] || state.Panes[i].Name == args[0] {
+			current = &state.Panes[i]
+			break
+		}
+	}
+	if current == nil {
+		return fmt.Errorf("pane 不存在：%s", args[0])
+	}
+	caps := current.EffectiveCaps()
+	aliases := map[string]*bool{
+		"receive_tasks":  &caps.ReceiveTasks,
+		"return_results": &caps.ReturnResults,
+		"push":           &caps.PushIdle,
+		"push_idle":      &caps.PushIdle,
+		"steer":          &caps.PushSteer,
+		"inject_steer":   &caps.PushSteer,
+		"prompt":         &caps.Prompt,
+		"pull":           &caps.Pull,
+	}
+	for _, item := range args[1:] {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			return fmt.Errorf("需要 key=value：%s", item)
+		}
+		target, found := aliases[key]
+		if !found {
+			return fmt.Errorf("未知的 caps 键：%s", key)
+		}
+		*target = value == "1" || value == "true" || value == "yes" || value == "on"
+	}
+	caps.Source = "user"
+	var out model.Pane
+	if err := call("pane.caps.set", map[string]any{"id": current.ID, "caps": caps}, &out); err != nil {
+		return err
+	}
+	return printJSON(out.Caps)
+}

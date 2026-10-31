@@ -101,13 +101,17 @@ def run(args):
         sender = peer("sender", settle_ms=10)
         time.sleep(.05)
         task = send(receiver, "hello\nsecond line")
-        assert task["state"] == "delivered" and task["delivery_mode"] == "inject"
+        assert task["state"] == "delivered" and task["delivery_mode"] in ("push", "inject")
         wait_until(lambda: task["id"] in screen_text(rpc.call("pane.screen", {"id": receiver["id"]})), "injected envelope")
         assert peer_ok("receiver", "task.ack", {"id": task["id"]})["state"] == "accepted"
         time.sleep(.05)  # Allow output settling so the busy gate is decisive.
         count_before = len(rpc.call("task.list"))
-        expect_error(lambda: send(receiver, "BUSY_MUST_NOT_ARRIVE"), "busy:")
-        assert len(rpc.call("task.list")) == count_before
+        # Busy is no longer a send failure: the task is queued with a reason and
+        # the scheduler delivers it once the in-flight task finishes.
+        busy = send(receiver, "BUSY_MUST_NOT_ARRIVE")
+        assert busy["state"] == "queued" and busy["queue_reason"].startswith("busy:"), busy
+        assert len(rpc.call("task.list")) == count_before + 1
+        rpc.call("task.cancel", {"id": busy["id"], "confirmed": True})
         queued = send(receiver, "QUEUED_AFTER_ACK", queue=True)
         assert queued["state"] == "queued"
         # ACK timeout applies only to unacknowledged delivery, not accepted work.
@@ -129,15 +133,15 @@ def run(args):
         blocked = spawn("blocked", [sys.executable, "-u", "-c", "import time;print('Log in');time.sleep(60)"], blocked_regex="Log in", settle_ms=10)
         wait_until(lambda: "Log in" in screen_text(rpc.call("pane.screen", {"id": blocked["id"]})), "blocked marker")
         before = len(rpc.call("task.list"))
-        expect_error(lambda: send(blocked, "MUST_NOT_BE_WRITTEN"), "blocked:")
-        assert len(rpc.call("task.list")) == before
+        blocked_task = send(blocked, "MUST_NOT_BE_WRITTEN")
+        assert blocked_task["state"] == "queued" and blocked_task["queue_reason"].startswith("blocked:"), blocked_task
+        assert len(rpc.call("task.list")) == before + 1
         assert "MUST_NOT_BE_WRITTEN" not in screen_text(rpc.call("pane.screen", {"id": blocked["id"]}))
-        record("blocked_gate_rejects_without_task_or_input")
+        record("blocked_gate_queues_with_reason_and_writes_nothing")
 
         time.sleep(.05)
         unconfirmed = send(receiver, "echo-only")
         wait_until(lambda: get(unconfirmed).get("delivery_status") == "write-unconfirmed", "unconfirmed echo")
-        expect_error(lambda: send(receiver, "busy rejection"), "busy:")
         retry = rpc.call("task.retry", {"id": unconfirmed["id"]})
         assert retry["retry_of"] == unconfirmed["id"] and retry["state"] == "delivered"
         assert get(unconfirmed)["state"] == "unknown"
@@ -155,7 +159,7 @@ def run(args):
         tasks_before = len(rpc.call("task.list"))
         screen_before = screen_text(rpc.call("pane.screen", {"id": observer["id"]}))
         notification = send(receiver, "notify only", delivery_mode="claim", on_complete="notify", report_to=observer["id"])
-        assert peer_ok("receiver", "task.next", {})["id"] == notification["id"]
+        assert peer_ok("receiver", "task.next", {"timeout_ms": 0})["id"] == notification["id"]
         rpc.call("task.done", {"id": notification["id"], "result": "report text " + "文" * 3000})
         duplicate = call_peer("receiver", "task.result", {"id": notification["id"], "result": "late duplicate"})
         assert "error" in duplicate
@@ -173,16 +177,16 @@ def run(args):
 
         for target in [receiver, observer]:
             rpc.call("edge.add", {"from": sender["id"], "to": target["id"]})
-        handoff = peer_ok("sender", "task.send", {"to": receiver["id"], "prompt": "handoff", "on_complete": "handoff", "report_to": observer["id"]})
-        peer_ok("receiver", "task.next", {})
+        handoff = peer_ok("sender", "task.send", {"to": receiver["id"], "prompt": "handoff", "delivery_mode": "pull", "on_complete": "handoff", "report_to": observer["id"]})
+        peer_ok("receiver", "task.next", {"timeout_ms": 0})
         peer_ok("receiver", "task.result", {"id": handoff["id"], "result": "follow-up input"})
         children = [t for t in rpc.call("task.list") if t.get("parent_task") == handoff["id"]]
         assert len(children) == 1 and children[0]["state"] == "queued" and children[0]["from"] == sender["id"]
         assert children[0]["to"] == observer["id"]
         record("handoff_new_queued_child_preserves_sender")
 
-        revoked = peer_ok("sender", "task.send", {"to": receiver["id"], "prompt": "revoke", "on_complete": "handoff", "report_to": observer["id"]})
-        peer_ok("receiver", "task.next", {})
+        revoked = peer_ok("sender", "task.send", {"to": receiver["id"], "prompt": "revoke", "delivery_mode": "pull", "on_complete": "handoff", "report_to": observer["id"]})
+        peer_ok("receiver", "task.next", {"timeout_ms": 0})
         rpc.call("edge.remove", {"from": sender["id"], "to": observer["id"]})
         rpc.call("task.done", {"id": revoked["id"], "result": "manual done cannot elevate sender"})
         revoked_report = next(r for r in rpc.call("report.list") if r["parent_task"] == revoked["id"])

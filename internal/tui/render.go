@@ -12,6 +12,9 @@ import (
 
 var barStyle = tcell.StyleDefault.Background(tcell.NewHexColor(0x223344)).Foreground(tcell.ColorWhite)
 var focusStyle = tcell.StyleDefault.Background(tcell.NewHexColor(0x245c6a)).Foreground(tcell.ColorWhite).Bold(true)
+var idleTitleStyle = tcell.StyleDefault.Background(tcell.NewHexColor(0x1b2430)).Foreground(tcell.NewHexColor(0x9aa7b4))
+var alertStyle = tcell.StyleDefault.Background(tcell.NewHexColor(0x5a2f2f)).Foreground(tcell.NewHexColor(0xffd7d7)).Bold(true)
+var hintStyle = tcell.StyleDefault.Background(tcell.NewHexColor(0x223344)).Foreground(tcell.NewHexColor(0x8fa3b5))
 
 func (u *ui) resize() {
 	w, h := u.screen.Size()
@@ -97,18 +100,34 @@ func (u *ui) draw() {
 			continue
 		}
 		style := barStyle
+		focused := i == u.focus
+		unread, attention := u.attention(p.ID)
 		marker := " "
-		if i == u.focus {
+		if focused {
 			style = focusStyle
-			marker = "●"
+			marker = "▌"
 		}
-		title := fmt.Sprintf("%s %s %s · %s", marker, p.ID, p.Name, p.State)
+		index := u.paneIndexOf(p.ID)
+		badge := " "
+		if index > 0 {
+			badge = fmt.Sprintf("%d", index)
+		}
+		glyph := stateGlyph(p.State, p.TurnState, attention)
+		title := fmt.Sprintf("%s%s %s%s · %s", marker, badge, glyph, p.Name, stateLabel(p.State, p.TurnState))
+		if unread > 0 {
+			title += fmt.Sprintf(" · %d 未读", unread)
+		}
 		if p.Backend == "acp" {
-			title += " · ACP " + p.TurnState
+			title += " · ACP"
 		}
 		if n := u.offsets[p.ID]; n > 0 {
 			title += fmt.Sprintf(" · ⟲ 回看 %d", n)
 			style = style.Background(tcell.NewHexColor(0x59466d))
+		} else if !focused {
+			style = idleTitleStyle
+		}
+		if len(attention) > 0 && !focused {
+			style = alertStyle
 		}
 		u.line(r.x, r.y, r.w, title, style)
 		if p.Backend == "acp" {
@@ -171,22 +190,62 @@ func (u *ui) draw() {
 			u.line(0, y+1+i, w, fmt.Sprintf("%s %s → %s [%s] %s", shortTask(t.ID), u.paneName(t.From), u.paneName(t.To), t.State, strings.SplitN(t.Prompt, "\n", 2)[0]), tcell.StyleDefault)
 		}
 	}
-	status := "点击聚焦 · 滚轮回看 · 拖选复制 · Ctrl-a t 发任务 · k 任务列表 · G 协作图 · ? 帮助"
-	if u.status != "" {
-		status = u.status + " · Ctrl-a ? 帮助"
+	left := u.viewStatus()
+	if queued := u.queuedTotal(); queued > 0 {
+		left += fmt.Sprintf(" · ⏸ %d 等投递", queued)
 	}
-	if u.prefix {
-		status = "Ctrl-a 前缀：? 帮助 n shell c 自定义 Agent o 聚焦 s 布局 z 放大 [ 回看 t 任务 d 离开"
+	if blocked := u.blockedDeliveries(); blocked > 0 {
+		left += fmt.Sprintf(" · ⚠ %d 投递受阻", blocked)
 	}
-	if u.copyMode {
-		status = "回看模式：↑↓ / j k 滚动 · PgUp/PgDn 翻页 · y 复制可见屏 · Esc 返回"
+	hint := u.statusHint()
+	u.line(0, h-1, w, "", barStyle)
+	u.line(0, h-1, min(w, uniseg.StringWidth(left)+1), left, barStyle)
+	if msg := u.status; msg != "" {
+		mid := 1 + uniseg.StringWidth(left)
+		avail := w - mid - uniseg.StringWidth(hint) - 2
+		if avail > 8 {
+			u.line(mid, h-1, avail, " "+msg, barStyle.Foreground(tcell.NewHexColor(0x9fe6c4)))
+		}
+	} else if avail := w - uniseg.StringWidth(left) - uniseg.StringWidth(hint) - 3; avail > 8 {
+		u.line(uniseg.StringWidth(left)+1, h-1, avail, " Alt+←→ 切 pane · Alt+1..9 直达 · Alt+z 单看", hintStyle)
 	}
-	u.line(0, h-1, w, u.viewStatus()+" · "+status, barStyle)
+	if hintW := uniseg.StringWidth(hint); w > hintW+1 {
+		u.line(w-hintW-1, h-1, hintW, hint, hintStyle)
+	}
 	if u.picker != nil {
 		u.drawPicker()
 	}
 	if u.help {
-		u.modal([]string{"wtable 快捷键（先按 Ctrl-a，再按下一键）", "?  帮助；任意键关闭帮助", "n  新建 $SHELL 终端", "a  控制面板：Agents / Edges / Tasks / Layers；c 自定义 Agent", "o 下一个 pane；f 选择器；z 单看 / 分屏；| 左右分屏；- 上下分屏", "T 新 tab；{ / } 切 tab；W 关 tab；, 命名；! 下一个 attention", "b  切换任务列表；t 给当前 pane 发送任务 / ACP prompt", "g  添加授权边选择器；r 授权边列表；t 多目标派活", "G  协作 Graph：j/k 选节点，Enter 打开，e 选边，x 删除", "k  任务列表：Enter 详情、Tab 报告；详情中重发 / 查看屏幕 / 人工处理", "面板表单：Tab 切字段，←→ 选项，Space 多选，Enter 提交", "R  原地重启已退出 pane；退出 pane 内 Enter 也可重启", "[  回看模式：↑↓、PgUp/PgDn；y 复制可见屏到剪贴板", "Ctrl-a Ctrl-a 发送原 Ctrl-a；普通 Ctrl-Z/P 等直达终端", "d / q  离开界面（后台 pane 保持运行）", "输入框：←→ 编辑，Home/End 行首尾，Ctrl-U/W 删除，↑↓ 历史", "Enter 提交；任务 Alt-Enter 换行；Esc 取消", "鼠标：点击 pane 聚焦；拖动分隔线调整行 / 列大小", "拖选 pane 内文字，松开复制；Esc / 点击恢复实时画面", "滚轮回看；应用启用鼠标时转发滚轮，Shift+滚轮强制回看", "MVP：选区限可见屏；点击不转发到 pane 内应用"})
+		u.modal([]string{
+			"快捷键 · 方向键优先（Alt 组合不传给 pane，普通按键照常进终端）",
+			"",
+			"移动    Alt+←/→/↑/↓（或 Alt+hjkl）切到该方向的 pane",
+			"        Alt+1..9 直达第 N 个 pane（标题左边就是编号）",
+			"        Alt+z 单看 / 还原；Ctrl-a f 从列表里挑",
+			"        Alt+←→ 到头不绕圈，按 Ctrl-a o 才是循环",
+			"",
+			"工作区  Ctrl-a T 新 tab · { } 切 tab · W 关 tab · , 重命名",
+			"        Ctrl-a | 左右分屏 · - 上下分屏 · s 一键重排",
+			"        Ctrl-a ! 跳到下一个需要你的人",
+			"",
+			"面板    Ctrl-a a 打开：Agents / Edges / Tasks / Layers",
+			"        ↑↓ 选择 · Tab 换页 · Enter 打开 · x 删除 · Esc 返回",
+			"        a 加 agent · e 编辑 · r 重发说明 · l 看日志 · R 重启",
+			"",
+			"任务    Ctrl-a t 派活（可多选目标）· k 任务列表 · b 底部任务条",
+			"        列表里 Enter 详情 · r 重发 · x 取消 · Tab 切报告",
+			"",
+			"协作    Ctrl-a G 协作图：↑↓ 选节点 · Enter 打开 · e 选边 · x 删边",
+			"",
+			"终端    Ctrl-a [ 回看：↑↓ 滚动 · PgUp/PgDn 翻页 · y 复制 · Esc 返回",
+			"        滚轮即可回看；拖选复制；Shift+滚轮强制回看",
+			"        应用启用鼠标时，鼠标事件转发给它，Shift 让位给本地",
+			"",
+			"输入框  ←→ 编辑 · Home/End 行首尾 · Ctrl-U/W 删除 · ↑↓ 历史",
+			"        Enter 提交 · Alt-Enter 换行 · Esc 取消",
+			"",
+			"退出    Ctrl-a d 离开（后台继续跑）· Ctrl-a ? 关掉本页",
+		})
 	}
 	if u.graph != nil {
 		u.drawGraph()

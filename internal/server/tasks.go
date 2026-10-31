@@ -73,15 +73,6 @@ func (s *Server) sendTask(principal string, raw json.RawMessage) (model.Task, er
 		return model.Task{}, err
 	}
 	s.mu.Lock()
-	paneID := a.To
-	if p := s.paneLocked(a.To); p != nil {
-		paneID = p.ID
-	}
-	s.mu.Unlock()
-	lane := s.inputLane(paneID)
-	lane.Lock()
-	defer lane.Unlock()
-	s.mu.Lock()
 	existing := false
 	if a.DedupeKey != "" {
 		for _, prior := range s.state.Tasks {
@@ -96,16 +87,14 @@ func (s *Server) sendTask(principal string, raw json.RawMessage) (model.Task, er
 	if err != nil {
 		return model.Task{}, err
 	}
-	if !existing && t.DeliveryMode == "inject" && !a.Queue {
-		if err := s.deliverInLane(t.ID, true); err != nil {
-			return t, err
-		}
-		s.mu.Lock()
-		t = *s.taskLocked(t.ID)
-		s.mu.Unlock()
-	} else if !existing && t.DeliveryMode == "prompt" {
-		go s.runQueue(t.To)
+	if existing {
+		return t, nil
 	}
+	s.notifyNextWaiter(t.To)
+	s.wake(t.To)
+	// Give an idle pane a short window to take the task, so callers see
+	// delivered when it was immediate and queued(reason) when it was not.
+	t = s.awaitFirstHop(t.ID, 1200*time.Millisecond)
 	return t, nil
 }
 
@@ -124,18 +113,11 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 		return model.Task{}, deniedError("没有发送到此 pane 的授权连线", p.ID)
 	}
 	a.To = p.ID
-	if a.DeliveryMode == "" {
-		a.DeliveryMode = "claim"
-		if principal == "controller" {
-			a.DeliveryMode = "inject"
-		}
-		if p.Backend == "acp" {
-			a.DeliveryMode = "prompt"
-		}
+	mode, err := resolveDelivery(p, a.DeliveryMode)
+	if err != nil {
+		return model.Task{}, err
 	}
-	if (p.Backend == "acp" && a.DeliveryMode != "prompt") || (p.Backend != "acp" && a.DeliveryMode != "inject" && a.DeliveryMode != "claim") {
-		return model.Task{}, errors.New("delivery_mode 与目标 backend 不兼容")
-	}
+	a.DeliveryMode = mode
 	if a.OnComplete == "" {
 		a.OnComplete = "none"
 		if a.ReportTo != "" {
@@ -164,11 +146,21 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 			return model.Task{}, deniedError("无权引用 parent_task")
 		}
 	}
-	if a.DedupeKey != "" {
+	if a.IdempotencyKey == "" {
+		a.IdempotencyKey = a.DedupeKey
+	}
+	if a.IdempotencyKey != "" {
+		if len(a.IdempotencyKey) > 256 {
+			return model.Task{}, errors.New("idempotency_key 最长 256 字节")
+		}
 		for _, t := range s.state.Tasks {
-			if t.From == principal && t.DedupeKey == a.DedupeKey {
-				if t.To != a.To || t.Prompt != a.Prompt || t.DeliveryMode != a.DeliveryMode || t.OnComplete != a.OnComplete || t.ReportTo != a.ReportTo || t.ParentTask != a.ParentTask {
-					return model.Task{}, errors.New("相同 dedupe_key 对应不同任务内容")
+			key := t.IdempotencyKey
+			if key == "" {
+				key = t.DedupeKey
+			}
+			if t.From == principal && key == a.IdempotencyKey {
+				if t.To != a.To || t.Prompt != a.Prompt || t.OnComplete != a.OnComplete || t.ReportTo != a.ReportTo || t.ParentTask != a.ParentTask {
+					return model.Task{}, errors.New("task idempotency key was reused with a different prompt")
 				}
 				return t, nil
 			}
@@ -180,50 +172,169 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 	if len(s.state.Tasks) >= 2000 {
 		return model.Task{}, errors.New("MVP 任务记录上限为 2,000 条")
 	}
-	if a.DeliveryMode == "inject" && !a.Queue {
-		if err := s.readyLocked(p); err != nil {
-			return model.Task{}, err
-		}
-	}
 	now := time.Now()
 	origin := principal
 	if origin == "controller" {
 		origin = "human"
 	}
-	t := model.Task{ID: newID("t-"), From: principal, Origin: origin, To: a.To, Prompt: a.Prompt, State: "queued", DeliveryMode: a.DeliveryMode, OnComplete: a.OnComplete, ReportTo: a.ReportTo, ParentTask: a.ParentTask, RetryOf: retryOf, DedupeKey: a.DedupeKey, CreatedAt: now, UpdatedAt: now}
+	t := model.Task{ID: newID("t-"), From: principal, Origin: origin, To: a.To, Prompt: a.Prompt, State: "queued", DeliveryMode: a.DeliveryMode, OnComplete: a.OnComplete, ReportTo: a.ReportTo, ParentTask: a.ParentTask, RetryOf: retryOf, DedupeKey: a.DedupeKey, IdempotencyKey: a.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
 	s.state.Tasks = append(s.state.Tasks, t)
 	return t, s.saveLocked()
 }
 
 func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
+	var a struct {
+		TimeoutMS int `json:"timeout_ms"`
+	}
+	if len(raw) > 0 {
+		_ = decode(raw, &a)
+	}
 	if principal == "controller" {
 		return nil, deniedError("next 必须在接收任务的 pane 内运行")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if p := s.paneLocked(principal); p != nil && p.Backend == "acp" {
-		return nil, errors.New("ACP 任务由 prompt 通道自动接收")
+		s.mu.Unlock()
+		return nil, errors.New("ACP 任务由 prompt 通道自动接收，不需要 next")
 	}
-	for _, t := range s.state.Tasks {
-		if t.To == principal && (t.State == "running" || (t.State == "accepted" && taskMode(t) == "claim")) {
-			return nil, errors.New("已有领取中的任务，请先提交 result")
+	s.mu.Unlock()
+
+	timeout := time.Duration(a.TimeoutMS) * time.Millisecond
+	if a.TimeoutMS <= 0 {
+		timeout = 30 * time.Second
+	}
+	if a.TimeoutMS < 0 {
+		timeout = 0
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		s.mu.Lock()
+		if s.closing || s.ctx.Err() != nil {
+			s.mu.Unlock()
+			return nil, errors.New("daemon 正在关闭")
+		}
+		for _, t := range s.state.Tasks {
+			if t.To == principal && (t.State == "running" || (t.State == "accepted" && taskMode(t) == "pull")) {
+				s.mu.Unlock()
+				return nil, errors.New("已有领取中的任务，请先提交 result")
+			}
+		}
+		for i := range s.state.Tasks {
+			t := &s.state.Tasks[i]
+			if t.To != principal || t.State != "queued" || taskMode(*t) != "pull" {
+				continue
+			}
+			if t.From != "controller" && !s.hasEdgeLocked(t.From, t.To) {
+				continue
+			}
+			now := time.Now()
+			t.State = "running"
+			t.AcceptedAt = &now
+			t.DeliveredVia = "pull"
+			t.QueueReason = ""
+			t.UpdatedAt = now
+			copy := *t
+			s.mu.Unlock()
+			return copy, s.saveLocked()
+		}
+		s.mu.Unlock()
+
+		if timeout == 0 || time.Now().After(deadline) {
+			return nil, nil
+		}
+		ch, ok := s.registerNextWaiter(principal)
+		if !ok {
+			return nil, errors.New("已有等待中的 next；同一个 pane 不要并发领取")
+		}
+		wait := time.Until(deadline)
+		if wait > time.Second {
+			wait = time.Second
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-s.ctx.Done():
+			timer.Stop()
+			s.clearNextWaiter(principal, ch)
+			return nil, errors.New("daemon 正在关闭")
+		case <-ch:
+			timer.Stop()
+		case <-timer.C:
+		}
+		s.clearNextWaiter(principal, ch)
+	}
+}
+
+// waitTask blocks until the task has a result (or the wait times out). Only the
+// sender may wait; a timeout reports unknown state instead of an error.
+func (s *Server) waitTask(principal string, raw json.RawMessage) (any, error) {
+	var a struct {
+		ID        string `json:"id"`
+		TimeoutMS int    `json:"timeout_ms"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	t := s.taskLocked(a.ID)
+	if t == nil {
+		s.mu.Unlock()
+		return nil, errors.New("任务不存在")
+	}
+	if principal != "controller" && t.From != principal {
+		s.mu.Unlock()
+		return nil, deniedError("only the task sender can wait for its result")
+	}
+	if finished(t.State) {
+		copy := *t
+		s.mu.Unlock()
+		return copy, nil
+	}
+	if s.taskWaiters == nil {
+		s.taskWaiters = map[string]chan struct{}{}
+	}
+	ch := make(chan struct{}, 1)
+	s.taskWaiters[a.ID] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.taskWaiters[a.ID] == ch {
+			delete(s.taskWaiters, a.ID)
+		}
+		s.mu.Unlock()
+	}()
+
+	timeout := time.Duration(a.TimeoutMS) * time.Millisecond
+	if a.TimeoutMS <= 0 {
+		timeout = 60 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		s.mu.Lock()
+		t = s.taskLocked(a.ID)
+		if t == nil {
+			s.mu.Unlock()
+			return nil, errors.New("任务不存在")
+		}
+		if finished(t.State) {
+			copy := *t
+			s.mu.Unlock()
+			return copy, nil
+		}
+		copy := *t
+		s.mu.Unlock()
+		select {
+		case <-s.ctx.Done():
+			return copy, nil
+		case <-ch:
+		case <-timer.C:
+			return copy, nil
 		}
 	}
-	for i := range s.state.Tasks {
-		t := &s.state.Tasks[i]
-		if t.To != principal || t.State != "queued" || taskMode(*t) != "claim" {
-			continue
-		}
-		if t.From != "controller" && !s.hasEdgeLocked(t.From, t.To) {
-			continue
-		}
-		now := time.Now()
-		t.State = "running"
-		t.AcceptedAt = &now
-		t.UpdatedAt = now
-		return *t, s.saveLocked()
-	}
-	return nil, nil
+}
+
+func finished(state string) bool {
+	return state == "completed" || state == "failed" || state == "cancelled"
 }
 
 func (s *Server) taskResult(principal string, raw json.RawMessage) (any, error) {
@@ -242,18 +353,23 @@ func (s *Server) finishTask(principal string, raw json.RawMessage, manual bool) 
 		return nil, errors.New("结果超过 1 MiB")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	t := s.taskLocked(a.ID)
 	if t == nil {
+		s.mu.Unlock()
 		return nil, errors.New("任务不存在")
 	}
 	if (!manual && t.To != principal) || (manual && principal != "controller") {
-		return nil, deniedError("只有接收 pane 可以提交结果；人工完成需要控制端")
+		s.mu.Unlock()
+		return nil, deniedError("only the task recipient can submit its result")
 	}
+	// A late result is accepted for delivered/accepted/unknown/cancelled/failed;
+	// only a task that already produced a final result is closed for good.
 	if t.State == "completed" {
-		return nil, errors.New("任务已经完成，结果不能覆盖")
+		s.mu.Unlock()
+		return nil, errors.New("task already has a result")
 	}
 	if !contains([]string{"running", "delivered", "accepted", "unknown", "cancelled", "failed", "cancelling"}, t.State) {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("任务状态为 %s，不能提交结果", t.State)
 	}
 	t.State = "completed"
@@ -270,9 +386,14 @@ func (s *Server) finishTask(principal string, raw json.RawMessage, manual bool) 
 	if manual {
 		t.Origin = "human"
 	}
+	t.ResultPushed = true
 	s.completeReportLocked(t)
 	copy := *s.taskLocked(a.ID)
-	return copy, s.saveLocked()
+	err := s.saveLocked()
+	s.mu.Unlock()
+	s.notifyTaskWaiter(a.ID)
+	s.wake(copy.To)
+	return copy, err
 }
 
 func (s *Server) getTasks(principal, method string, raw json.RawMessage) (any, error) {
@@ -422,7 +543,7 @@ func (s *Server) cancelTask(raw json.RawMessage) (any, error) {
 	}
 	a := s.agents[t.To]
 	term := s.terminals[t.To]
-	if t.State != "queued" && taskMode(*t) == "claim" {
+	if t.State != "queued" && taskMode(*t) == "pull" {
 		s.mu.Unlock()
 		return nil, errors.New("PTY 领取任务不能可靠取消；请停止 pane 并检查执行结果")
 	}

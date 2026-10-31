@@ -55,6 +55,9 @@ type Server struct {
 	catalogAt         time.Time
 	catalogVersions   map[string]string
 	diagnosticSecrets map[string][]string
+	pumps             map[string]*pumpState
+	nextWaiters       map[string]chan struct{}
+	taskWaiters       map[string]chan struct{}
 	closing           bool
 }
 
@@ -127,6 +130,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 		return err
 	}
 	go s.deliveryLoop()
+	s.wakeQueued()
 	defer listener.Close()
 	defer os.Remove(paths.Socket)
 	if err = os.Chmod(paths.Socket, 0600); err != nil {
@@ -413,7 +417,7 @@ func contains(values []string, s string) bool {
 func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (result any, err error) {
 	defer func() { err = s.auditDenied(c.principal, method, raw, err) }()
 	controller := c.principal == "controller"
-	if !controller && !contains([]string{"diag.info", "peer.list", "task.send", "task.next", "task.result", "task.ack", "task.get", "task.list", "task.seen", "report.list", "report.get", "report.seen"}, method) {
+	if !controller && !contains([]string{"diag.info", "peer.list", "task.send", "task.next", "task.wait", "task.result", "task.ack", "task.get", "task.list", "task.seen", "report.list", "report.get", "report.seen"}, method) {
 		return nil, deniedError("此操作需要人类控制端权限")
 	}
 	switch method {
@@ -471,6 +475,8 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 			return nil, err
 		}
 		return s.updatePane(a)
+	case "pane.caps.set":
+		return s.setCaps(raw)
 	case "pane.remove", "pane.brief", "pane.brief.send":
 		var a struct {
 			ID string `json:"id"`
@@ -587,6 +593,8 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		return s.sendTask(c.principal, raw)
 	case "task.next":
 		return s.nextTask(c.principal, raw)
+	case "task.wait":
+		return s.waitTask(c.principal, raw)
 	case "task.result":
 		return s.taskResult(c.principal, raw)
 	case "task.ack", "task.confirm", "task.seen":

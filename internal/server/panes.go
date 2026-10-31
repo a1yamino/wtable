@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,39 @@ import (
 	"wtable/internal/model"
 	"wtable/internal/terminal"
 )
+
+// setCaps lets a user (or a probe) override what a pane accepts. The controller
+// is the only caller; presets provide the defaults.
+func (s *Server) setCaps(raw json.RawMessage) (model.Pane, error) {
+	var a struct {
+		ID   string          `json:"id"`
+		Caps *model.PaneCaps `json:"caps"`
+	}
+	if err := decode(raw, &a); err != nil {
+		return model.Pane{}, err
+	}
+	if a.Caps == nil {
+		return model.Pane{}, errors.New("缺少 caps")
+	}
+	s.mu.Lock()
+	p := s.paneLocked(a.ID)
+	if p == nil {
+		s.mu.Unlock()
+		return model.Pane{}, errors.New("pane 不存在")
+	}
+	caps := *a.Caps
+	if caps.Source == "" {
+		caps.Source = "user"
+	}
+	p.Caps = &caps
+	copy := clonePane(*p)
+	err := s.saveLocked()
+	s.mu.Unlock()
+	if err == nil && caps.PushIdle {
+		s.wake(copy.ID)
+	}
+	return copy, err
+}
 
 func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, error) {
 	var role model.RoleTemplate
@@ -284,7 +318,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		return copy, errors.New("pane 启动已取消")
 	}
 	if err == nil {
-		go s.runQueue(id)
+		s.wake(id)
 	}
 	return copy, err
 }
@@ -350,7 +384,7 @@ func (s *Server) paneExited(id, runID string, code int, err error) {
 	for i := range s.state.Tasks {
 		t := &s.state.Tasks[i]
 		if t.To == id && activeState(t.State) {
-			if t.State == "cancelling" && taskMode(*t) == "inject" {
+			if t.State == "cancelling" && (taskMode(*t) == "push" || taskMode(*t) == "steer") {
 				// Process exit does not replace the human confirmation required by inject cancellation.
 				t.Result = "agent 进程已退出；取消仍待人工确认，已发生的操作不会撤销"
 			} else {

@@ -131,7 +131,7 @@ func TestReportVisibilityAfterGrantRevocation(t *testing.T) {
 			s := taskTestServer(t)
 			s.state.Panes = []model.Pane{{ID: "sender", Backend: "pty", State: "running"}, {ID: "worker", Backend: "pty", State: "running"}, {ID: "inbox", Backend: "pty", State: "running"}}
 			s.state.Edges = []model.Edge{{From: "sender", To: "worker"}, {From: "sender", To: "inbox"}}
-			task, err := s.sendTask("sender", rawTask(model.SendParams{To: "worker", Prompt: "work", ReportTo: "inbox"}))
+			task, err := s.sendTask("sender", rawTask(model.SendParams{To: "worker", Prompt: "work", DeliveryMode: "pull", ReportTo: "inbox"}))
 			if err != nil {
 				t.Fatal(err)
 			}

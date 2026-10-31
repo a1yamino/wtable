@@ -354,7 +354,11 @@ func (u *ui) agentSummary(p model.Pane) string {
 	if !p.LastActivity.IsZero() {
 		activity = p.LastActivity.Local().Format("15:04:05")
 	}
-	return fmt.Sprintf("%s · %s · %s · 未读 %d %s · %s · %s", p.Name, p.State, visibility, unread, strings.Join(attention, ","), truncateColumns(p.LastOutput, 80), activity)
+	queue := ""
+	if n := u.queuedTasks(p.ID); n > 0 {
+		queue = fmt.Sprintf(" · ⏸%d", n)
+	}
+	return fmt.Sprintf("%s · %s · %s · 未读 %d %s%s · %s · %s", p.Name, p.State, visibility, unread, strings.Join(attention, ","), queue, truncateColumns(p.LastOutput, 80), activity)
 }
 func (u *ui) viewStatus() string {
 	t := u.tab()
