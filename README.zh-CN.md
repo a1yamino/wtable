@@ -326,6 +326,10 @@ smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授�
 
 外部 provider 的登录、适配器兼容性和恢复能力需要针对实际安装版本验证，不能由 fixture 测试结果推出。
 
+## 本地开发 fixture
+
+`make tui` 在 `.dev/devstack` 打开隔离 TUI，只列本机真实 agent；`make tui-fixtures` 额外提供确定性的 PTY 与 ACP fixture。`make dev` 只启动 daemon 不进入界面；`make dev-clean` 清掉 fixture pane，`make dev-down` 回收整个开发栈。两者都不读写默认状态目录。`scripts/dev.sh add fg|pty|auto|acp|shell [NAME]` 添加 fixture pane，`kill NAME` 移除一个，`clean` 清掉所有 `dev-*` pane。`auto` fixture 会自动 ack 并完成注入任务，无需模型即可观察任务与报告界面。
+
 ## 当前限制
 
 - 只验证 macOS；不支持远程接入和多 client 旁观。

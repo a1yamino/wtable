@@ -31,8 +31,9 @@
 !/internal/tui/
 !/internal/tui/*.go
 
-# Maintained Python scripts.
+# Maintained scripts.
 !/scripts/
 !/scripts/*.py
+!/scripts/*.sh
 !/scripts/fixtures/
 !/scripts/fixtures/*.py

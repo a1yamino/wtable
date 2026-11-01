@@ -1,10 +1,28 @@
-.PHONY: build test smoke check
+.PHONY: build test smoke check tui tui-fixtures dev dev-down dev-clean
 
 build:
 	go build -o bin/wtable ./cmd/wtable
 
 test:
 	go test -race ./internal/terminal ./internal/agent ./internal/server
+
+# Isolated TUI for manual work. `make tui` shows only real installed agents;
+# `make tui-fixtures` also lists the deterministic dev-* fixtures.
+tui: build
+	./scripts/dev.sh tui --real
+
+tui-fixtures: build
+	./scripts/dev.sh tui
+
+# Start the daemon without attaching (for a TUI opened separately).
+dev: build
+	./scripts/dev.sh up
+
+dev-down:
+	./scripts/dev.sh down
+
+dev-clean:
+	./scripts/dev.sh clean
 
 smoke: build
 	python3 scripts/smoke.py --binary bin/wtable --output .dev/test-results/smoke.json

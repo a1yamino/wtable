@@ -319,6 +319,10 @@ The smoke script uses a real daemon, PTYs, SQLite, and temporary Git repositorie
 
 External provider authentication, adapter compatibility, and session recovery must be validated against the actual installed versions. Passing fixture tests does not establish that compatibility.
 
+## Local development fixtures
+
+`make tui` opens an isolated TUI under `.dev/devstack` that lists only real installed agents; `make tui-fixtures` also exposes the deterministic PTY and ACP fixtures. `make dev` starts the daemon without attaching; `make dev-clean` removes fixture panes and `make dev-down` shuts the stack down. Neither reads nor writes the default state directory. `scripts/dev.sh add fg|pty|auto|acp|shell [NAME]` adds a fixture pane, `kill NAME` removes one, and `clean` removes all `dev-*` panes. The `auto` fixture acknowledges and completes injected tasks, so the task and report UI can be exercised without a model.
+
 ## Current limitations
 
 - Validated on macOS only. Remote connections and additional observer clients are not supported.
