@@ -143,6 +143,7 @@ func (u *ui) spawnPreset(preset model.Preset, kind string) {
 		Preset:      preset.ID,
 		Backend:     preset.Backend,
 		Cwd:         cwd,
+		Workspace:   u.workspace,
 		Layer:       u.activeLayer,
 		InjectBrief: preset.ID != "shell",
 		Cols:        80,
@@ -172,7 +173,7 @@ func (u *ui) createShell(kind string) {
 	if shell == "" {
 		shell = "/bin/zsh"
 	}
-	args := model.SpawnParams{Name: u.autoAgentName("shell"), Kind: kind, Backend: "pty", Cwd: cwd, Layer: u.activeLayer, Cols: 80, Rows: 24}
+	args := model.SpawnParams{Name: u.autoAgentName("shell"), Kind: kind, Backend: "pty", Cwd: cwd, Workspace: u.workspace, Layer: u.activeLayer, Cols: 80, Rows: 24}
 	var pane model.Pane
 	if !u.callWithin(10e9, "pane.spawn", args, &pane) {
 		return
@@ -208,7 +209,7 @@ func (u *ui) spawnShell(command []string) bool {
 		cwd = ""
 	}
 	var pane model.Pane
-	if !u.call("pane.spawn", model.SpawnParams{Name: u.autoAgentName("shell"), Kind: kind, Backend: "pty", Command: command, Cwd: cwd, Layer: u.activeLayer, Cols: 80, Rows: 24}, &pane) {
+	if !u.call("pane.spawn", model.SpawnParams{Name: u.autoAgentName("shell"), Kind: kind, Backend: "pty", Command: command, Cwd: cwd, Workspace: u.workspace, Layer: u.activeLayer, Cols: 80, Rows: 24}, &pane) {
 		return false
 	}
 	_, _ = u.refresh()

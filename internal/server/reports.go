@@ -68,10 +68,16 @@ func (s *Server) completeReportLocked(t *model.Task) {
 		}
 	}
 	r.Summary = reportSummary(summary)
-	recipient := s.paneLocked(t.ReportTo)
-	if recipient == nil || (t.From != "controller" && !s.hasEdgeLocked(t.From, t.ReportTo)) {
+	recipient, _ := s.resolvePaneLocked(t.Workspace, t.ReportTo)
+	crossWorkspace := false
+	if recipient != nil {
+		if from := s.paneByIDLocked(t.To); from != nil && from.Workspace != recipient.Workspace {
+			crossWorkspace = true
+		}
+	}
+	if recipient == nil || crossWorkspace || (t.From != "controller" && !s.hasEdgeLocked(t.From, t.ReportTo)) {
 		r.State = "undeliverable"
-		r.Error = "报告目标不存在或原发送方的授权连线已撤销"
+		r.Error = "报告目标不存在、跨工作区或原发送方的授权连线已撤销"
 	} else if t.OnComplete == "handoff" && final && !finalReported {
 		if len(s.state.Tasks) >= 2000 {
 			r.State = "undeliverable"
@@ -83,7 +89,7 @@ func (s *Server) completeReportLocked(t *model.Task) {
 			r.Error = "handoff 目标不接受后续任务：" + modeErr.Error()
 		} else {
 			now := time.Now()
-			next := model.Task{ID: newID("t-"), From: t.From, Origin: t.Origin, To: recipient.ID, Prompt: fmt.Sprintf("Task %s (%s) finished with state %s.\n%s", t.ID, t.To, t.State, reportSummary(t.Result)), Kind: "handoff", State: "queued", DeliveryMode: mode, ParentTask: t.ID, OnComplete: "none", CreatedAt: now, UpdatedAt: now}
+			next := model.Task{ID: newID("t-"), From: t.From, Origin: t.Origin, To: recipient.ID, Prompt: fmt.Sprintf("Task %s (%s) finished with state %s.\n%s", t.ID, t.To, t.State, reportSummary(t.Result)), Kind: "handoff", State: "queued", Workspace: t.Workspace, DeliveryMode: mode, ParentTask: t.ID, OnComplete: "none", CreatedAt: now, UpdatedAt: now}
 			if s.taskContentBytesLocked()+len(next.Prompt) > maxTaskContentBytes {
 				r.State = "undeliverable"
 				r.Error = "任务内容总量已达上限，无法创建 handoff 任务"
@@ -105,14 +111,40 @@ func (s *Server) completeReportLocked(t *model.Task) {
 
 func (s *Server) reports(principal, method string, raw json.RawMessage) (any, error) {
 	var a struct {
-		ID string `json:"id"`
+		ID        string `json:"id"`
+		Workspace string `json:"workspace,omitempty"`
 	}
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
+	scope := ""
+	if a.Workspace != "" {
+		clean, err := cleanWorkspacePath(a.Workspace)
+		if err != nil {
+			return nil, err
+		}
+		scope = clean
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	inScope := func(r model.Report) bool {
+		if scope == "" {
+			return true
+		}
+		if parent := s.taskLocked(r.ParentTask); parent != nil {
+			return parent.Workspace == scope
+		}
+		for _, id := range []string{r.From, r.To} {
+			if p := s.paneByIDLocked(id); p != nil {
+				return p.Workspace == scope
+			}
+		}
+		return false
+	}
 	visible := func(r model.Report) bool {
+		if !inScope(r) {
+			return false
+		}
 		parent := s.taskLocked(r.ParentTask)
 		return principal == "controller" || (r.To == principal && r.State == "delivered") || r.From == principal || (parent != nil && parent.From == principal)
 	}
@@ -227,8 +259,8 @@ func (s *Server) retryTask(raw json.RawMessage) (any, error) {
 	if taskMode(old) == "steer" {
 		delivery = "push"
 	}
-	params := model.SendParams{To: a.To, Prompt: old.Prompt, Kind: old.Kind, DeliveryMode: delivery, Queue: a.Queue, OnComplete: old.OnComplete, ReportTo: old.ReportTo, ParentTask: old.ParentTask}
-	if p := s.paneLocked(a.To); p != nil {
+	params := model.SendParams{To: a.To, Prompt: old.Prompt, Kind: old.Kind, Workspace: old.Workspace, DeliveryMode: delivery, Queue: a.Queue, OnComplete: old.OnComplete, ReportTo: old.ReportTo, ParentTask: old.ParentTask}
+	if p, err := s.resolvePaneLocked(old.Workspace, a.To); err == nil {
 		mode, err := resolveDelivery(p, params.DeliveryMode)
 		if err != nil {
 			s.mu.Unlock()

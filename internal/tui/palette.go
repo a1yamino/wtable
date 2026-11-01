@@ -52,6 +52,10 @@ func (u *ui) paletteItems() []paletteItem {
 			u.palette = nil
 			u.openTasks()
 		}},
+		{label: "切换工作区", hint: "Ctrl-a w · 后台 agent 继续运行", run: func() {
+			u.palette = nil
+			u.openWorkspacePicker("switch")
+		}},
 		{label: "队列", hint: "排队消息：提到最前 / 编辑 / 取消", run: func() {
 			u.palette = nil
 			if p := u.current(); p != nil {

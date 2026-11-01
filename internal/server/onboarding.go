@@ -219,24 +219,40 @@ func (s *Server) resolveLayer(args *model.SpawnParams) error {
 	if args.Layer == "" {
 		return nil
 	}
+	if args.Workspace != "" {
+		path, err := cleanWorkspacePath(args.Workspace)
+		if err != nil {
+			return err
+		}
+		args.Workspace = path
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var found *model.Layer
 	for i := range s.state.Layers {
 		l := &s.state.Layers[i]
+		if args.Workspace != "" && l.Workspace != args.Workspace {
+			continue
+		}
 		if l.Path == args.Layer {
 			found = l
 			break
 		}
 		if l.Name == args.Layer {
 			if found != nil {
-				return errors.New("layer 名称不唯一，请使用完整路径")
+				return errors.New("layer 名称不唯一，请使用完整路径或指定工作区")
 			}
 			found = l
 		}
 	}
 	if found == nil {
+		if args.Workspace != "" {
+			return errors.New("指定工作区内没有此 layer")
+		}
 		return errors.New("layer 不存在")
+	}
+	if args.Workspace == "" {
+		args.Workspace = found.Workspace
 	}
 	if args.Cwd == "" {
 		args.Cwd = found.Path
@@ -256,7 +272,7 @@ func (s *Server) resolveLayer(args *model.SpawnParams) error {
 func (s *Server) briefTextLocked(p model.Pane, extra []string) (string, error) {
 	peers := []string{}
 	for _, other := range s.state.Panes {
-		if other.ID != p.ID && (s.hasEdgeLocked(p.ID, other.ID) || contains(extra, other.ID)) {
+		if other.ID != p.ID && other.Workspace == p.Workspace && (s.hasEdgeLocked(p.ID, other.ID) || contains(extra, other.ID)) {
 			peers = append(peers, other.ID+" ("+other.Name+")")
 		}
 	}
@@ -310,12 +326,12 @@ func (s *Server) enqueueBriefLocked(p *model.Pane, text string) (model.Task, err
 	return task, s.saveLocked()
 }
 
-func (s *Server) paneBrief(ref string, send bool) (any, error) {
+func (s *Server) paneBrief(ref, workspace string, send bool) (any, error) {
 	s.mu.Lock()
-	p := s.paneLocked(ref)
-	if p == nil {
+	p, err := s.resolvePaneLocked(workspace, ref)
+	if err != nil {
 		s.mu.Unlock()
-		return nil, errors.New("pane 不存在")
+		return nil, err
 	}
 	text, err := s.briefTextLocked(*p, nil)
 	if err != nil {
@@ -353,12 +369,12 @@ func (s *Server) updatePane(args model.PaneUpdate) (model.Pane, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p := s.paneLocked(args.ID)
-	if p == nil {
-		return model.Pane{}, errors.New("pane 不存在")
+	p, err := s.resolvePaneLocked(args.Workspace, args.ID)
+	if err != nil {
+		return model.Pane{}, err
 	}
-	if other := s.paneLocked(args.Name); other != nil && other.ID != p.ID {
-		return model.Pane{}, errors.New("pane 名称已存在")
+	if other := s.paneByNameLocked(p.Workspace, args.Name); other != nil && other.ID != p.ID {
+		return model.Pane{}, errors.New("工作区内 pane 名称已存在")
 	}
 	if p.Account != args.Account && !contains([]string{"exited", "failed", "interrupted"}, p.State) {
 		return model.Pane{}, errors.New("账号只能在 exited/failed/interrupted 时修改；运行中环境不会改变")
@@ -393,12 +409,12 @@ func (s *Server) updatePane(args model.PaneUpdate) (model.Pane, error) {
 	return copy, s.saveLocked()
 }
 
-func (s *Server) removePane(ref string) error {
+func (s *Server) removePane(ref, workspace string) error {
 	s.mu.Lock()
-	p := s.paneLocked(ref)
-	if p == nil {
+	p, err := s.resolvePaneLocked(workspace, ref)
+	if err != nil {
 		s.mu.Unlock()
-		return errors.New("pane 不存在")
+		return err
 	}
 	id := p.ID
 	s.mu.Unlock()
@@ -459,7 +475,15 @@ func (s *Server) removePane(ref string) error {
 			delete(s.approvals, key)
 		}
 	}
-	err := s.saveLocked()
+	if s.state.LastFocus == id {
+		s.state.LastFocus = ""
+	}
+	for i := range s.state.Workspaces {
+		if s.state.Workspaces[i].LastFocus == id {
+			s.state.Workspaces[i].LastFocus = ""
+		}
+	}
+	err = s.saveLocked()
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()

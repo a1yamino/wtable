@@ -110,6 +110,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 		}
 	}
 	migratePaneKinds(&state)
+	migrateWorkspaces(&state)
 	for i := range state.Tasks {
 		if activeState(state.Tasks[i].State) {
 			state.Tasks[i].State = "unknown"
@@ -276,7 +277,7 @@ func (s *Server) serve(conn net.Conn, id uint64) {
 			s.respond(conn, req.ID, nil, errors.New("pane 凭证已失效"))
 			return
 		}
-		if storeErr != nil && !contains([]string{"diag.info", "state.get", "pane.stop", "shutdown", "task.cancel", "permission.reply"}, req.Method) {
+		if storeErr != nil && !contains([]string{"diag.info", "state.get", "workspace.list", "pane.stop", "shutdown", "task.cancel", "permission.reply"}, req.Method) {
 			s.respond(conn, req.ID, nil, fmt.Errorf("状态无法持久化，已停止新操作：%w", storeErr))
 			continue
 		}
@@ -347,15 +348,91 @@ func clonePane(p model.Pane) model.Pane {
 	return p
 }
 
+func (s *Server) paneByIDLocked(id string) *model.Pane {
+	if id == "" {
+		return nil
+	}
+	for i := range s.state.Panes {
+		if s.state.Panes[i].ID == id {
+			return &s.state.Panes[i]
+		}
+	}
+	return nil
+}
+
+// paneLocked resolves a ref for internal ID-based paths and legacy callers.
+// Exact IDs win; a name must be unique across all panes, otherwise nil is
+// returned instead of silently picking an arbitrary workspace's pane.
 func (s *Server) paneLocked(ref string) *model.Pane {
+	if ref == "" {
+		return nil
+	}
+	if p := s.paneByIDLocked(ref); p != nil {
+		return p
+	}
+	var found *model.Pane
 	for i := range s.state.Panes {
 		p := &s.state.Panes[i]
-		if p.ID == ref || p.Name == ref {
+		if p.Name != ref {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = p
+	}
+	return found
+}
+
+// paneByNameLocked returns the pane with this name inside one workspace.
+func (s *Server) paneByNameLocked(workspace, name string) *model.Pane {
+	if name == "" {
+		return nil
+	}
+	for i := range s.state.Panes {
+		p := &s.state.Panes[i]
+		if p.Name == name && p.Workspace == workspace {
 			return p
 		}
 	}
 	return nil
 }
+
+// resolvePaneLocked is the user-facing resolver. When a workspace is known,
+// names resolve only inside it; without one, a name must be globally unique.
+func (s *Server) resolvePaneLocked(workspace, ref string) (*model.Pane, error) {
+	if ref == "" {
+		return nil, errors.New("pane 不存在")
+	}
+	if p := s.paneByIDLocked(ref); p != nil {
+		if workspace != "" && p.Workspace != workspace {
+			return nil, errors.New("pane 不属于指定工作区")
+		}
+		return p, nil
+	}
+	var found *model.Pane
+	for i := range s.state.Panes {
+		p := &s.state.Panes[i]
+		if p.Name != ref || (workspace != "" && p.Workspace != workspace) {
+			continue
+		}
+		if found != nil {
+			if workspace == "" {
+				return nil, fmt.Errorf("pane 名称 %q 在多个工作区中不唯一；请使用 pane ID 或指定工作区", ref)
+			}
+			return nil, fmt.Errorf("pane 名称 %q 在工作区内不唯一；请使用 pane ID", ref)
+		}
+		found = p
+	}
+	if found == nil {
+		if workspace != "" {
+			return nil, fmt.Errorf("当前工作区没有 pane %q", ref)
+		}
+		return nil, errors.New("pane 不存在")
+	}
+	return found, nil
+}
+
 func (s *Server) taskLocked(id string) *model.Task {
 	for i := range s.state.Tasks {
 		if s.state.Tasks[i].ID == id {
@@ -375,38 +452,104 @@ func (s *Server) hasEdgeLocked(from, to string) bool {
 
 func (s *Server) snapshot(raw json.RawMessage) (model.Snapshot, error) {
 	var args struct {
-		Offsets map[string]int `json:"offsets"`
-		IDs     []string       `json:"ids"`
-		Frames  *bool          `json:"frames"`
-		Graph   bool           `json:"graph"`
+		Offsets   map[string]int `json:"offsets"`
+		IDs       []string       `json:"ids"`
+		Frames    *bool          `json:"frames"`
+		Graph     bool           `json:"graph"`
+		Workspace string         `json:"workspace,omitempty"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return model.Snapshot{}, err
 	}
+	workspace := ""
+	if args.Workspace != "" {
+		clean, err := cleanWorkspacePath(args.Workspace)
+		if err != nil {
+			return model.Snapshot{}, err
+		}
+		workspace = clean
+	}
 	s.mu.Lock()
 	// The TUI polls this every ~33ms. Keep list payloads bounded; report detail
 	// still fetches the full 4 KiB summary through report.get.
+	paneIDs := map[string]bool{}
+	for i := range s.state.Panes {
+		p := &s.state.Panes[i]
+		if workspace == "" || p.Workspace == workspace {
+			paneIDs[p.ID] = true
+		}
+	}
+	taskWorkspace := make(map[string]string, len(s.state.Tasks))
+	for i := range s.state.Tasks {
+		taskWorkspace[s.state.Tasks[i].ID] = s.state.Tasks[i].Workspace
+	}
 	reports := make([]model.Report, 0, len(s.state.Reports))
 	for _, r := range s.state.Reports {
+		if workspace != "" {
+			// A report belongs to the workspace of its parent task. Temporary
+			// and legacy reports fall back to the pane endpoints.
+			inScope := false
+			if r.ParentTask != "" {
+				inScope = taskWorkspace[r.ParentTask] == workspace
+			}
+			if !inScope {
+				inScope = paneIDs[r.From] || paneIDs[r.To]
+			}
+			if !inScope {
+				continue
+			}
+		}
 		r.Summary = short(r.Summary, 500)
 		r.Error = short(r.Error, 500)
 		reports = append(reports, r)
 	}
-	result := model.Snapshot{Revision: s.revision.Load(), Edges: append([]model.Edge{}, s.state.Edges...), Reports: reports, Layers: append([]model.Layer{}, s.state.Layers...), LastFocus: s.state.LastFocus}
+	taskIDs := map[string]bool{}
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if workspace == "" || t.Workspace == workspace || (t.Workspace == "" && (paneIDs[t.To] || paneIDs[t.From])) {
+			taskIDs[t.ID] = true
+		}
+	}
+	edges := make([]model.Edge, 0, len(s.state.Edges))
+	for _, e := range s.state.Edges {
+		if workspace == "" || (paneIDs[e.From] && paneIDs[e.To]) {
+			edges = append(edges, e)
+		}
+	}
+	layers := make([]model.Layer, 0, len(s.state.Layers))
+	for _, l := range s.state.Layers {
+		if workspace == "" || l.Workspace == workspace {
+			layers = append(layers, l)
+		}
+	}
+	result := model.Snapshot{Revision: s.revision.Load(), Edges: edges, Reports: reports, Layers: layers, Workspace: workspace, Workspaces: s.workspaceInfosLocked(false)}
+	if workspace == "" {
+		result.LastFocus = s.state.LastFocus
+	} else {
+		result.LastFocus = s.workspaceFocusLocked(s.workspaceLocked(workspace))
+	}
 	terms := map[string]*terminal.Terminal{}
 	for _, p := range s.state.Panes {
+		if !paneIDs[p.ID] {
+			continue
+		}
 		result.Panes = append(result.Panes, s.paneMetadataLocked(p))
 		if t := s.terminals[p.ID]; t != nil {
 			terms[p.ID] = t
 		}
 	}
 	for _, t := range s.state.Tasks {
+		if !taskIDs[t.ID] {
+			continue
+		}
 		t.Prompt = short(t.Prompt, 300)
 		t.Result = short(t.Result, 500)
 		result.Tasks = append(result.Tasks, t)
 	}
 	for _, a := range s.approvals {
-		result.Permissions = append(result.Permissions, a.permission)
+		if workspace == "" || paneIDs[a.permission.PaneID] {
+			result.Permissions = append(result.Permissions, a.permission)
+		}
 	}
 	// Map iteration order is random; a stable order lets a human process the
 	// oldest request first instead of chasing a reshuffled list every poll.
@@ -460,6 +603,16 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		return nil, deniedError("此操作需要人类控制端权限")
 	}
 	switch method {
+	case "workspace.list":
+		return s.workspaceList(), nil
+	case "workspace.open":
+		var a struct {
+			Path string `json:"path"`
+		}
+		if err := decode(raw, &a); err != nil {
+			return nil, err
+		}
+		return s.openWorkspace(a.Path)
 	case "diag.info":
 		if !controller {
 			return map[string]string{"version": config.Version}, nil
@@ -491,11 +644,19 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		p := s.paneLocked(a.ID)
+		p := s.paneByIDLocked(a.ID)
+		if p == nil {
+			p = s.paneLocked(a.ID)
+		}
 		if p == nil {
 			return nil, errors.New("pane 不存在")
 		}
 		s.state.LastFocus = p.ID
+		if p.Workspace != "" {
+			if ws := s.workspaceLocked(p.Workspace); ws != nil {
+				ws.LastFocus = p.ID
+			}
+		}
 		p.Unread = 0
 		// Opening a pane is the human's read acknowledgement: clear the
 		// finished results and reports addressed to it in the same commit.
@@ -551,15 +712,16 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		return s.setCaps(raw)
 	case "pane.remove", "pane.brief", "pane.brief.send":
 		var a struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
 		}
 		if err := decode(raw, &a); err != nil {
 			return nil, err
 		}
 		if method == "pane.remove" {
-			return true, s.removePane(a.ID)
+			return true, s.removePane(a.ID, a.Workspace)
 		}
-		return s.paneBrief(a.ID, method == "pane.brief.send")
+		return s.paneBrief(a.ID, a.Workspace, method == "pane.brief.send")
 	case "pane.spawn":
 		var p model.SpawnParams
 		if err := decode(raw, &p); err != nil {
@@ -568,32 +730,35 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		return s.spawn(p, "")
 	case "pane.restart":
 		var a struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
 		}
 		if err := decode(raw, &a); err != nil {
 			return nil, err
 		}
 		s.mu.Lock()
-		p := s.paneLocked(a.ID)
-		if p == nil {
+		p, err := s.resolvePaneLocked(a.Workspace, a.ID)
+		if err != nil {
 			s.mu.Unlock()
-			return nil, errors.New("pane 不存在")
+			return nil, err
 		}
 		copy := clonePane(*p)
 		s.mu.Unlock()
-		return s.spawn(model.SpawnParams{Name: copy.Name, Backend: copy.Backend, Command: copy.Command, Cwd: copy.Cwd, Preset: copy.Preset, Role: copy.Role, Account: copy.Account, Layer: copy.Layer, InjectBrief: copy.InjectBrief, DeliveryConfig: copy.DeliveryConfig}, copy.ID)
+		return s.spawn(model.SpawnParams{Name: copy.Name, Backend: copy.Backend, Command: copy.Command, Cwd: copy.Cwd, Workspace: copy.Workspace, Preset: copy.Preset, Role: copy.Role, Account: copy.Account, Layer: copy.Layer, InjectBrief: copy.InjectBrief, DeliveryConfig: copy.DeliveryConfig}, copy.ID)
 	case "pane.stop":
 		var a struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
 		}
 		if err := decode(raw, &a); err != nil {
 			return nil, err
 		}
-		return true, s.stop(a.ID)
+		return true, s.stop(a.ID, a.Workspace)
 	case "pane.input":
 		var a struct {
-			ID   string `json:"id"`
-			Data string `json:"data"`
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
+			Data      string `json:"data"`
 		}
 		if err := decode(raw, &a); err != nil {
 			return nil, err
@@ -602,7 +767,12 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 			return nil, errors.New("输入超过 1 MiB")
 		}
 		s.mu.Lock()
-		t := s.terminals[a.ID]
+		p, err := s.resolvePaneLocked(a.Workspace, a.ID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		t := s.terminals[p.ID]
 		writer := s.writer
 		s.mu.Unlock()
 		if writer != 0 && writer != c.id {
@@ -611,21 +781,27 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		if t == nil {
 			return nil, errors.New("pane 没有运行中的 PTY")
 		}
-		lane := s.inputLane(a.ID)
+		lane := s.inputLane(p.ID)
 		lane.Lock()
 		defer lane.Unlock()
 		return true, t.Input([]byte(a.Data))
 	case "pane.resize":
 		var a struct {
-			ID   string `json:"id"`
-			Cols int    `json:"cols"`
-			Rows int    `json:"rows"`
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
+			Cols      int    `json:"cols"`
+			Rows      int    `json:"rows"`
 		}
 		if err := decode(raw, &a); err != nil {
 			return nil, err
 		}
 		s.mu.Lock()
-		t := s.terminals[a.ID]
+		p, err := s.resolvePaneLocked(a.Workspace, a.ID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		t := s.terminals[p.ID]
 		writer := s.writer
 		s.mu.Unlock()
 		if writer != 0 && writer != c.id {
@@ -640,18 +816,20 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 		return true, t.Resize(a.Cols, a.Rows)
 	case "pane.screen":
 		var a struct {
-			ID     string `json:"id"`
-			Offset int    `json:"offset"`
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
+			Offset    int    `json:"offset"`
 		}
 		if err := decode(raw, &a); err != nil {
 			return nil, err
 		}
 		s.mu.Lock()
-		p := s.paneLocked(a.ID)
-		var t *terminal.Terminal
-		if p != nil {
-			t = s.terminals[p.ID]
+		p, err := s.resolvePaneLocked(a.Workspace, a.ID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
 		}
+		t := s.terminals[p.ID]
 		s.mu.Unlock()
 		if t == nil {
 			return nil, errors.New("没有可读取的终端画面")
@@ -660,7 +838,7 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 	case "edge.add", "edge.remove":
 		return s.edge(method, raw)
 	case "peer.list":
-		return s.peers(c.principal), nil
+		return s.peers(c.principal, raw), nil
 	case "task.send":
 		return s.sendTask(c.principal, raw)
 	case "task.next":

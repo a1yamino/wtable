@@ -40,6 +40,10 @@ func run(args []string) error {
 		fmt.Println("wtable " + config.Version)
 		return nil
 	}
+	workspace, args, err := extractWorkspace(args)
+	if err != nil {
+		return err
+	}
 	paths, err := config.Resolve()
 	if err != nil {
 		return err
@@ -90,11 +94,18 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Creation and name-based refs belong to the directory the command runs in
+	// unless the caller names another workspace. Read-only listings stay
+	// unscoped unless a workspace is explicit, so admin views keep working.
+	defaultWorkspace := workspace
+	if defaultWorkspace == "" {
+		defaultWorkspace = cwd
+	}
 	if len(args) == 0 || args[0] == "attach" {
 		if len(args) > 1 {
-			return errors.New("MVP 只支持本地 attach")
+			return errors.New("用法：wtable [--workspace PATH]")
 		}
-		return tui.Run(ctx, c, cwd)
+		return tui.Run(ctx, c, cwd, workspace)
 	}
 	call := func(method string, args, result any) error { return c.Call(ctx, method, args, result) }
 	jsonMode := false
@@ -122,7 +133,11 @@ func run(args []string) error {
 		return printJSON(out)
 	case "list", "panes":
 		var state model.Snapshot
-		if err = call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+		params := map[string]any{"frames": false}
+		if workspace != "" {
+			params["workspace"] = workspace
+		}
+		if err = call("state.get", params, &state); err != nil {
 			return err
 		}
 		if jsonMode {
@@ -136,7 +151,7 @@ func run(args []string) error {
 		return w.Flush()
 	case "peers":
 		var panes []model.Pane
-		if err = call("peer.list", nil, &panes); err != nil {
+		if err = call("peer.list", workspaceArgs(workspace), &panes); err != nil {
 			return err
 		}
 		return printJSON(panes)
@@ -180,7 +195,11 @@ func run(args []string) error {
 		return printJSON(out)
 	case "inbox":
 		var state model.Snapshot
-		if err = call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+		params := map[string]any{"frames": false}
+		if workspace != "" {
+			params["workspace"] = workspace
+		}
+		if err = call("state.get", params, &state); err != nil {
 			return err
 		}
 		if jsonMode {
@@ -193,13 +212,13 @@ func run(args []string) error {
 		}
 		return w.Flush()
 	case "pane":
-		return paneCommand(args[1:], call)
+		return paneCommand(args[1:], defaultWorkspace, call)
 	case "remove":
 		if len(args) != 2 {
 			return errors.New("用法：wtable remove PANE")
 		}
 		var out any
-		if err = call("pane.remove", map[string]string{"id": args[1]}, &out); err != nil {
+		if err = call("pane.remove", map[string]string{"id": args[1], "workspace": defaultWorkspace}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -213,7 +232,7 @@ func run(args []string) error {
 			return errors.New("用法：wtable brief PANE | wtable brief send PANE")
 		}
 		var out any
-		if err = call(method, map[string]string{"id": target}, &out); err != nil {
+		if err = call(method, map[string]string{"id": target, "workspace": defaultWorkspace}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -222,6 +241,7 @@ func run(args []string) error {
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
 		name := fs.String("name", "", "pane 名称")
 		dir := fs.String("dir", cwd, "工作目录")
+		wsFlag := fs.String("workspace", defaultWorkspace, "工作区目录（默认跟随 --workspace/WTABLE_WORKSPACE，否则当前目录）")
 		backend := fs.String("backend", "", "pty 或 acp（默认使用预设后端，否则 pty）")
 		kind := fs.String("kind", "", "foreground 或 worker（省略时：无前台则第一个 PTY 成为前台，ACP 永远是 worker）")
 		preset := fs.String("preset", "", "启动预设 ID")
@@ -258,6 +278,17 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		ws := ""
+		if *wsFlag != "" {
+			if ws, err = filepath.Abs(*wsFlag); err != nil {
+				return err
+			}
+			dirSet := false
+			fs.Visit(func(f *flag.Flag) { dirSet = dirSet || f.Name == "dir" })
+			if !dirSet {
+				abs = ws
+			}
+		}
 		if *roleTemplate != "" && *layer == "" {
 			dirSet := false
 			fs.Visit(func(f *flag.Flag) { dirSet = dirSet || f.Name == "dir" })
@@ -288,7 +319,7 @@ func run(args []string) error {
 		var p model.Pane
 		spawnCtx, stop := context.WithTimeout(ctx, 45*time.Second)
 		defer stop()
-		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Kind: *kind, Backend: *backend, Cwd: abs, Command: command, Cols: 80, Rows: 24,
+		err = c.Call(spawnCtx, "pane.spawn", model.SpawnParams{Name: *name, Kind: *kind, Backend: *backend, Cwd: abs, Workspace: ws, Command: command, Cols: 80, Rows: 24,
 			Preset: *preset, Role: *role, RoleTemplate: *roleTemplate, Account: *account, Layer: *layer, InjectBrief: *brief, ConnectTo: connectTo, DeliveryConfig: model.DeliveryConfig{
 				BlockedRegex: *blockedRegex, TailLines: *tailLines, SettleMS: int(settle.Milliseconds()),
 				VerifyMS: int(verify.Milliseconds()), AckTimeoutMS: int(ackTimeout.Milliseconds()),
@@ -309,7 +340,7 @@ func run(args []string) error {
 		paneCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 		var out any
-		if err = c.Call(paneCtx, "pane."+args[0], map[string]string{"id": args[1]}, &out); err != nil {
+		if err = c.Call(paneCtx, "pane."+args[0], map[string]string{"id": args[1], "workspace": defaultWorkspace}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -322,7 +353,7 @@ func run(args []string) error {
 			method = "edge.remove"
 		}
 		var out any
-		if err = call(method, model.Edge{From: args[1], To: args[2]}, &out); err != nil {
+		if err = call(method, map[string]string{"from": args[1], "to": args[2], "workspace": defaultWorkspace}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -337,9 +368,16 @@ func run(args []string) error {
 		onComplete := fs.String("on-complete", "", "none、notify 或 handoff")
 		reportTo := fs.String("report-to", "", "结果回传目标 pane")
 		parentTask := fs.String("parent", "", "关联的父任务 ID")
+		wsFlag := fs.String("workspace", defaultWorkspace, "工作区目录")
 		timeout := fs.Duration("timeout", 10*time.Minute, "ask 的等待时限；0 表示立即超时")
 		if err = fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		ws := defaultWorkspace
+		if *wsFlag != "" {
+			if ws, err = filepath.Abs(*wsFlag); err != nil {
+				return err
+			}
 		}
 		rest := fs.Args()
 		if len(rest) < 2 {
@@ -351,7 +389,7 @@ func run(args []string) error {
 		}
 		var t model.Task
 		if err = call("task.send", model.SendParams{
-			To: rest[0], Prompt: strings.Join(rest[1:], " "), Kind: *kind, DedupeKey: *key,
+			To: rest[0], Prompt: strings.Join(rest[1:], " "), Kind: *kind, Workspace: ws, DedupeKey: *key,
 			DeliveryMode: mode, Queue: *queue, OnComplete: *onComplete, ReportTo: *reportTo, ParentTask: *parentTask,
 		}, &t); err != nil {
 			return err
@@ -471,13 +509,13 @@ func run(args []string) error {
 		}
 		return printJSON(out)
 	case "task":
-		return taskCommand(args[1:], call)
+		return taskCommand(args[1:], defaultWorkspace, call)
 	case "reports":
 		if len(args) != 1 {
 			return errors.New("用法：wtable reports [--json]")
 		}
 		var reports []model.Report
-		if err = call("report.list", nil, &reports); err != nil {
+		if err = call("report.list", workspaceArgs(workspace), &reports); err != nil {
 			return err
 		}
 		if jsonMode {
@@ -499,13 +537,13 @@ func run(args []string) error {
 			return errors.New("用法：wtable report <report-id> | report seen <report-id>")
 		}
 		var out any
-		if err = call(method, map[string]string{"id": id}, &out); err != nil {
+		if err = call(method, map[string]string{"id": id, "workspace": defaultWorkspace}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
 	case "tasks":
 		var tasks []model.Task
-		if err = call("task.list", nil, &tasks); err != nil {
+		if err = call("task.list", workspaceArgs(workspace), &tasks); err != nil {
 			return err
 		}
 		if jsonMode {
@@ -534,7 +572,7 @@ func run(args []string) error {
 		return printJSON(out)
 	case "permissions":
 		var state model.Snapshot
-		if err = call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+		if err = call("state.get", stateParams(workspace), &state); err != nil {
 			return err
 		}
 		return printJSON(state.Permissions)
@@ -548,7 +586,7 @@ func run(args []string) error {
 			return errors.New("用法：wtable screen <pane>")
 		}
 		var f model.Frame
-		if err = call("pane.screen", map[string]string{"id": args[1]}, &f); err != nil {
+		if err = call("pane.screen", map[string]string{"id": args[1], "workspace": defaultWorkspace}, &f); err != nil {
 			return err
 		}
 		if jsonMode {
@@ -568,14 +606,14 @@ func run(args []string) error {
 		if len(args) < 3 {
 			return errors.New("用法：wtable input <pane-id> <text>；通过 shell 的 $'…\\n' 发送换行")
 		}
-		return call("pane.input", map[string]string{"id": args[1], "data": strings.Join(args[2:], " ")}, nil)
+		return call("pane.input", map[string]string{"id": args[1], "workspace": defaultWorkspace, "data": strings.Join(args[2:], " ")}, nil)
 	case "layer":
 		if len(args) < 2 {
 			return errors.New("用法：wtable layer list|create")
 		}
 		if args[1] == "list" {
 			var state model.Snapshot
-			if err = call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+			if err = call("state.get", stateParams(workspace), &state); err != nil {
 				return err
 			}
 			return printJSON(state.Layers)
@@ -586,6 +624,7 @@ func run(args []string) error {
 		fs := flag.NewFlagSet("layer create", flag.ContinueOnError)
 		dir := fs.String("dir", cwd, "仓库目录")
 		base := fs.String("base", "", "基准引用")
+		wsFlag := fs.String("workspace", defaultWorkspace, "工作区目录")
 		if err = fs.Parse(args[3:]); err != nil {
 			return err
 		}
@@ -593,11 +632,17 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		ws := ""
+		if *wsFlag != "" {
+			if ws, err = filepath.Abs(*wsFlag); err != nil {
+				return err
+			}
+		}
 		var out model.Layer
 		// createLayer may run several 30s git commands (rev-parse, worktree add).
 		layerCtx, cancel := context.WithTimeout(ctx, 130*time.Second)
 		defer cancel()
-		if err = c.Call(layerCtx, "layer.create", map[string]string{"name": args[2], "cwd": abs, "base": *base}, &out); err != nil {
+		if err = c.Call(layerCtx, "layer.create", map[string]string{"name": args[2], "cwd": abs, "base": *base, "workspace": ws}, &out); err != nil {
 			return err
 		}
 		return printJSON(out)
@@ -626,9 +671,9 @@ func run(args []string) error {
 }
 
 // paneCommand preserves omitted metadata fields when editing a pane.
-func paneCommand(args []string, call func(string, any, any) error) error {
+func paneCommand(args []string, workspace string, call func(string, any, any) error) error {
 	if len(args) > 0 && args[0] == "caps" {
-		return paneCaps(args[1:], call)
+		return paneCaps(args[1:], workspace, call)
 	}
 	if len(args) == 0 || args[0] != "edit" {
 		return errors.New("用法：wtable pane edit [...] 或 wtable pane caps PANE key=value...")
@@ -638,14 +683,23 @@ func paneCommand(args []string, call func(string, any, any) error) error {
 	role := fs.String("role", "", "角色说明（空字符串清除）")
 	roleTemplate := fs.String("role-template", "", "角色模板（空字符串切换为自由角色）")
 	account := fs.String("account", "", "已配置的账号名称（空字符串清除）")
+	wsFlag := fs.String("workspace", workspace, "工作区目录")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || fs.NFlag() == 0 {
 		return errors.New("用法：wtable pane edit [--name NAME] [--role TEXT] [--account NAME] PANE；至少指定一个选项")
 	}
+	ws := workspace
+	if *wsFlag != "" {
+		abs, err := filepath.Abs(*wsFlag)
+		if err != nil {
+			return err
+		}
+		ws = abs
+	}
 	var state model.Snapshot
-	if err := call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+	if err := call("state.get", stateParams(ws), &state); err != nil {
 		return err
 	}
 	target := fs.Arg(0)
@@ -669,7 +723,7 @@ func paneCommand(args []string, call func(string, any, any) error) error {
 	if current == nil {
 		return fmt.Errorf("pane 不存在：%s", target)
 	}
-	update := model.PaneUpdate{ID: current.ID, Name: current.Name, Role: current.Role, Account: current.Account}
+	update := model.PaneUpdate{ID: current.ID, Workspace: ws, Name: current.Name, Role: current.Role, Account: current.Account}
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "name":
@@ -690,7 +744,7 @@ func paneCommand(args []string, call func(string, any, any) error) error {
 }
 
 // taskCommand parses options only before task IDs, preserving free-form result text.
-func taskCommand(args []string, call func(string, any, any) error) error {
+func taskCommand(args []string, workspace string, call func(string, any, any) error) error {
 	usage := errors.New("用法：wtable task TASK | task done|fail [--json] TASK TEXT|- | task retry [--to PANE] [--queue] TASK | task confirm|seen|result TASK")
 	fs := flag.NewFlagSet("task", flag.ContinueOnError)
 	jsonMode := fs.Bool("json", false, "输出 JSON")
@@ -757,14 +811,23 @@ func taskCommand(args []string, call func(string, any, any) error) error {
 		fs.BoolVar(jsonMode, "json", *jsonMode, "输出 JSON")
 		to := fs.String("to", "", "改派给目标 pane")
 		queue := fs.Bool("queue", false, "目标忙时显式排队")
+		wsFlag := fs.String("workspace", workspace, "工作区目录")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		if len(fs.Args()) != 1 {
 			return usage
 		}
+		ws := workspace
+		if *wsFlag != "" {
+			abs, err := filepath.Abs(*wsFlag)
+			if err != nil {
+				return err
+			}
+			ws = abs
+		}
 		var t model.Task
-		if err := call("task.retry", map[string]any{"id": fs.Args()[0], "to": *to, "queue": *queue}, &t); err != nil {
+		if err := call("task.retry", map[string]any{"id": fs.Args()[0], "to": *to, "queue": *queue, "workspace": ws}, &t); err != nil {
 			return err
 		}
 		if *jsonMode {
@@ -810,6 +873,48 @@ func taskCommand(args []string, call func(string, any, any) error) error {
 		return nil
 	}
 	return printJSON(t)
+}
+
+// extractWorkspace consumes leading --workspace/-w flags only. Scanning the
+// whole argv would corrupt free-form prompts and child command arguments.
+func extractWorkspace(args []string) (string, []string, error) {
+	workspace := os.Getenv("WTABLE_WORKSPACE")
+	rest := args
+	for len(rest) > 0 {
+		arg := rest[0]
+		if arg == "--workspace" || arg == "-w" {
+			if len(rest) < 2 {
+				return "", nil, errors.New("--workspace 需要目录")
+			}
+			workspace, rest = rest[1], rest[2:]
+			continue
+		}
+		if strings.HasPrefix(arg, "--workspace=") {
+			workspace, rest = strings.TrimPrefix(arg, "--workspace="), rest[1:]
+			continue
+		}
+		break
+	}
+	if workspace != "" {
+		abs, err := filepath.Abs(workspace)
+		if err != nil {
+			return "", nil, err
+		}
+		workspace = abs
+	}
+	return workspace, rest, nil
+}
+
+func workspaceArgs(workspace string) map[string]string {
+	return map[string]string{"workspace": workspace}
+}
+
+func stateParams(workspace string) map[string]any {
+	params := map[string]any{"frames": false}
+	if workspace != "" {
+		params["workspace"] = workspace
+	}
+	return params
 }
 
 func ensureDaemon(ctx context.Context, p config.Paths) error {
@@ -893,14 +998,16 @@ func short(s string, n int) string {
 	return s
 }
 
-const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
+const help = `wtable 0.5.0 — macOS 终端 Agent 工作台
 
 启动与终端：
-  wtable                                  打开 TUI，自动启动本地 daemon
+  wtable [--workspace PATH]               打开 TUI；先选择工作区，自动启动本地 daemon
   wtable attach                           重新接入；Ctrl-a d 退出界面
-  wtable new [name] [--dir PATH] [--kind foreground|worker] -- CMD...  新建真实终端
+  --workspace PATH | WTABLE_WORKSPACE     指定工作区并跳过启动选择器
+                                          TUI 内 Ctrl-a w 可随时切换工作区
+  wtable new [name] [--dir PATH] [--workspace PATH] [--kind foreground|worker] -- CMD...  新建真实终端
   wtable recruit [NAME] [OPTIONS] [-- CMD...]
-    --preset ID --backend pty|acp --dir PATH --layer NAME|PATH
+    --preset ID --backend pty|acp --dir PATH --layer NAME|PATH --workspace PATH
     --kind foreground|worker  前台只能是 PTY；ACP 只能创建为 worker
     --role TEXT --account NAME --brief --connect TARGET
     --connect 可重复或用逗号分隔；方向为新 pane → TARGET
@@ -911,13 +1018,18 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
   wtable remove PANE                       移除 pane 并取消相关排队任务
   wtable brief PANE                        查看接入说明（JSON）
   wtable brief send PANE                   通过任务通道发送接入说明
-  wtable list [--json]                     查看 pane
+  wtable list [--json]                     查看当前工作区的 pane
   wtable screen PANE                      读取终端画面
   wtable stop PANE | restart PANE          停止或显式恢复
   wtable input PANE TEXT                   向终端发送原始输入（不自动加换行）
 
+工作区：
+  每个工作区是独立目录，拥有自己的前台、worker、连边、任务和收件箱。
+  新建 pane 归属 --workspace/WTABLE_WORKSPACE；未指定时归属当前目录。
+  pane 名称只在工作区内唯一；跨工作区操作请使用 pane ID 或指定工作区。
+
 任务与授权：
-  wtable connect FROM TO                   授予单向任务投递权限
+  wtable connect FROM TO                   授予单向任务投递权限（仅限同一工作区）
   wtable disconnect FROM TO                移除权限并取消尚未投递的任务
   wtable peers                            查看当前身份可访问的接收者
   wtable send [OPTIONS] PANE PROMPT        投递任务，打印 task ID
@@ -928,7 +1040,7 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
   wtable ack TASK                         接收 pane 确认已接手
   wtable result [--failed] TASK TEXT|-     接收 pane 提交结果；- 读取 stdin
   wtable wait [--timeout 10m] TASK          等待已有任务
-  wtable tasks | task TASK                 任务列表（含送达状态）、详情
+  wtable tasks | task TASK                 当前工作区任务列表（含送达状态）、详情
   wtable task done|fail TASK TEXT|-        人工标记完成或失败
   wtable task promote TASK                 把排队任务提前到队首
   wtable task edit TASK TEXT|-             修改尚未投递的排队任务
@@ -941,13 +1053,13 @@ const help = `wtable 0.4.0 — macOS 终端 Agent 工作台
   wtable role list | put [OPTIONS] NAME FILE | delete NAME   角色模板
   wtable audit                            最近越权拒绝记录（最多 256 条）
   wtable permissions                      查看待审批操作及选项 ID
-  wtable inbox [--json]                   收件箱：谁需要你（权限/退出/未读/任务）
+  wtable inbox [--json]                   当前工作区收件箱：谁需要你（权限/退出/未读/任务）
   wtable audit permissions                审批决定记录（允许/拒绝/取消/过期/未知）
   wtable approve REQUEST OPTION           明确选择权限选项
 
 Git 与运维：
-  wtable layer create NAME [--dir PATH] [--base REF]
-  wtable layer list                       列出隔离的 worktree
+  wtable layer create NAME [--dir PATH] [--base REF] [--workspace PATH]
+  wtable layer list                       列出当前工作区的 worktree
   wtable changes | diff [PATH]            当前仓库变更与只读 diff
   wtable diag | version | shutdown        诊断、版本、停止 daemon 和所有 pane
 
@@ -963,12 +1075,12 @@ Ctrl-a ? 查看 TUI 快捷键。不支持远程、历史 reflow 或鼠标选区�
 
 // paneCaps sets one or more capability flags, e.g.
 // wtable pane caps p-1 inject_steer=true pull=false
-func paneCaps(args []string, call func(string, any, any) error) error {
+func paneCaps(args []string, workspace string, call func(string, any, any) error) error {
 	if len(args) < 2 {
 		return errors.New("用法：wtable pane caps PANE receive_tasks=true push=true steer=true prompt=false pull=true")
 	}
 	var state model.Snapshot
-	if err := call("state.get", map[string]bool{"frames": false}, &state); err != nil {
+	if err := call("state.get", stateParams(workspace), &state); err != nil {
 		return err
 	}
 	var current *model.Pane
@@ -1005,7 +1117,7 @@ func paneCaps(args []string, call func(string, any, any) error) error {
 	}
 	caps.Source = "user"
 	var out model.Pane
-	if err := call("pane.caps.set", map[string]any{"id": current.ID, "caps": caps}, &out); err != nil {
+	if err := call("pane.caps.set", map[string]any{"id": current.ID, "workspace": workspace, "caps": caps}, &out); err != nil {
 		return err
 	}
 	return printJSON(out.Caps)

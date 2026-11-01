@@ -144,7 +144,7 @@ func (u *ui) sendChat(p *model.Pane) {
 	}
 	position := len(u.queuedForPane(p.ID)) + 1
 	var task model.Task
-	if !u.call("task.send", model.SendParams{To: p.ID, Prompt: text, Kind: "chat", DeliveryMode: "prompt", Queue: true}, &task) {
+	if !u.call("task.send", model.SendParams{To: p.ID, Workspace: u.workspace, Prompt: text, Kind: "chat", DeliveryMode: "prompt", Queue: true}, &task) {
 		return
 	}
 	input.Remember("acp")
@@ -252,6 +252,10 @@ func (u *ui) overlayDrawKey() string {
 	if q := u.queueView; q != nil {
 		fmt.Fprintf(&b, "queue:%s:%d;", q.paneID, q.selected)
 	}
+	if w := u.workspacePicker; w != nil {
+		fmt.Fprintf(&b, "workspace:%s:%d:%s:%s;", w.purpose, w.cursor, w.filter, w.err)
+	}
+	fmt.Fprintf(&b, "ws:%s;", u.workspace)
 	fmt.Fprintf(&b, "rail:%s:%s:%t:%v;area:%d;approval:%+v;canvas:%+v;interrupt:%t;chat:%t;",
 		u.rail.sel, u.rail.filter, u.canvas.drawer, u.rail.dismissed, u.area, u.approval, u.canvas, u.interruptConfirm, u.allowChat)
 	return b.String()

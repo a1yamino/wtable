@@ -69,6 +69,11 @@ class Session:
     def shown(self, text):
         return text in self.screen()
 
+    def choose_workspace(self):
+        wait_until(lambda: self.shown("选择工作区"), "workspace picker")
+        assert self.shown("当前目录"), self.screen()
+        self.send(b"\r")
+
     def send(self, data):
         os.write(self.master, data.encode() if isinstance(data, str) else data)
         time.sleep(.15)
@@ -119,6 +124,7 @@ def run(args):
                "command": [sys.executable, str(script_dir / "fixtures/acp_agent.py"), "--root", str(fixture_root)]}
         pty_preset = {"id": "pty-fixture", "name": "PTY fixture", "backend": "pty", "command": ["/bin/cat"]}
         session = Session(binary, script_dir, [pty_preset, acp])
+        session.choose_workspace()
 
         wait_until(lambda: session.shown("新建前台 agent"), "first-run picker")
         assert session.shown("PTY fixture"), session.screen()
@@ -127,6 +133,7 @@ def run(args):
         pane = wait_until(lambda: next((p for p in session.panes() if p["state"] == "running"), None), "foreground agent")
         assert pane["kind"] == "foreground" and pane["backend"] == "pty", pane
         assert pane["name"] == "pty-fixture", pane
+        assert pane.get("workspace") == str(session.root.resolve()), pane
         assert len(session.panes()) == 1
         record("first_run_creates_one_pty_foreground_with_a_single_enter_and_hides_acp")
 
@@ -149,6 +156,7 @@ def run(args):
 
         broken = {"id": "broken-pty", "name": "Broken PTY", "backend": "pty", "command": ["/nonexistent/agent"]}
         session = Session(binary, script_dir, [broken, acp])
+        session.choose_workspace()
         wait_until(lambda: session.shown("新建前台 agent"), "fallback picker")
         wait_until(lambda: session.shown("重新检测") and session.shown("创建 shell"), "fallback actions")
         session.send("s")

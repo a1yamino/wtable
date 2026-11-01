@@ -45,18 +45,37 @@ func gitCommand(cwd string, args ...string) (string, error) {
 
 func (s *Server) createLayer(raw json.RawMessage) (model.Layer, error) {
 	var a struct {
-		Name string `json:"name"`
-		Cwd  string `json:"cwd"`
-		Base string `json:"base"`
+		Name      string `json:"name"`
+		Cwd       string `json:"cwd"`
+		Base      string `json:"base"`
+		Workspace string `json:"workspace,omitempty"`
 	}
 	if err := decode(raw, &a); err != nil {
 		return model.Layer{}, err
+	}
+	workspace := ""
+	if a.Workspace != "" {
+		clean, err := cleanWorkspacePath(a.Workspace)
+		if err != nil {
+			return model.Layer{}, err
+		}
+		if info, err := os.Stat(clean); err != nil || !info.IsDir() {
+			return model.Layer{}, errors.New("工作区目录不存在或不是目录")
+		}
+		workspace = clean
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$`).MatchString(a.Name) {
 		return model.Layer{}, errors.New("layer 名称需要 1–40 个字母、数字、下划线或连字符")
 	}
 	if a.Cwd == "" {
 		return model.Layer{}, errors.New("需要仓库目录")
+	}
+	if workspace == "" {
+		clean, err := cleanWorkspacePath(a.Cwd)
+		if err != nil {
+			return model.Layer{}, err
+		}
+		workspace = clean
 	}
 	repo, err := gitCommand(a.Cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -73,12 +92,12 @@ func (s *Server) createLayer(raw json.RawMessage) (model.Layer, error) {
 	if err != nil {
 		return model.Layer{}, err
 	}
-	layer := model.Layer{Name: a.Name, Repo: repo, Branch: "wtable/layer/" + a.Name, Path: filepath.Join(s.paths.Home, "worktrees", hash(repo)[:12], a.Name)}
+	layer := model.Layer{Name: a.Name, Repo: repo, Branch: "wtable/layer/" + a.Name, Path: filepath.Join(s.paths.Home, "worktrees", hash(repo)[:12], a.Name), Workspace: workspace}
 	s.mu.Lock()
 	for _, l := range s.state.Layers {
 		if l.Repo == repo && l.Name == a.Name {
 			s.mu.Unlock()
-			return model.Layer{}, errors.New("layer 已存在")
+			return model.Layer{}, fmt.Errorf("该仓库已有同名 layer（属于工作区 %s）", l.Workspace)
 		}
 	}
 	s.mu.Unlock()

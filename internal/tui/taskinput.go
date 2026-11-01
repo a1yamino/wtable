@@ -126,7 +126,7 @@ func (u *ui) submitTaskComposer(input string) {
 		u.resize()
 		return
 	}
-	args := model.SendParams{To: p.ID, Prompt: input, Kind: "delegation", Queue: true}
+	args := model.SendParams{To: p.ID, Workspace: u.workspace, Prompt: input, Kind: "delegation", Queue: true}
 	if u.taskDelivery == "steer" {
 		args.DeliveryMode = "steer"
 	}

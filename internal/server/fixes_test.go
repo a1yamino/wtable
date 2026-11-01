@@ -206,7 +206,7 @@ func TestPeerListHidesPaneDiagnostics(t *testing.T) {
 	}
 	s.state.Edges = []model.Edge{{From: "peer", To: "target"}}
 
-	got := s.peers("peer")
+	got := s.peers("peer", nil)
 	if len(got) != 1 || got[0].ID != "target" || got[0].Name != "Target" {
 		t.Fatalf("peer lost the target identity: %+v", got)
 	}

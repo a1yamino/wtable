@@ -22,7 +22,7 @@ func (u *ui) mouse(e *tcell.EventMouse) {
 	u.mouseDown = down
 	// Mouse input must never change the target of an open prompt or approve it.
 	if u.graph != nil || u.help || u.mode != "" || u.pendingPaste != "" || u.pasting ||
-		u.palette != nil || u.create != nil || u.queueView != nil {
+		u.palette != nil || u.create != nil || u.queueView != nil || u.workspacePicker != nil {
 		u.drag = nil
 		u.selection = nil
 		return

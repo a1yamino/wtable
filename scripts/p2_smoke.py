@@ -182,6 +182,8 @@ def run(args):
         def related_line(item_id):
             return next((line for line in screen().splitlines() if item_id in line.split()), "")
 
+        wait_until(lambda: shown("选择工作区"), "workspace picker")
+        send(b"\r")
         wait_until(lambda: shown("PEER_READY"), "initial TUI")
         prefix("G")
         wait_until(lambda: shown("Graph"), "Graph opened")

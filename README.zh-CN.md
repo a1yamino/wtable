@@ -10,31 +10,47 @@ macOS 上的终端多 Agent 工作台。使用 Go、自有 pane 和真实 PTY，
 
 需要 Go 1.27 或以上版本。Git 功能需要本机 Git；agent 使用各自已安装的程序和登录配置。
 
+安装一次后，可以从任意目录运行：
+
 ```sh
-go build -o bin/wtable ./cmd/wtable
-./bin/wtable
+make install                 # 构建并安装到 ~/.local/bin/wtable
+# make install PREFIX=/usr/local
+# 或：go install ./cmd/wtable
+wtable
 ```
 
-首次运行会启动本地 daemon 并打开 PTY 前台选择器，按一次 `Enter` 创建你主要对话的 agent。按 `Ctrl-a`，再按 `q`，退出界面；pane 继续运行。再次运行 `./bin/wtable` 即可接回并恢复上次聚焦的 pane。
+`make install` 默认安装到 `~/.local/bin`，请确认该目录在 `PATH` 中。在源码目录里也可以直接运行 `./bin/wtable`，无需安装。
+
+首次运行会启动本地 daemon，并先询问打开哪个工作区（目录）。当前目录排在第一行，最近打开的工作区随后，光标默认落在上次选择；按 `Enter` 进入后，如果该工作区还没有 agent，再打开 PTY 前台选择器。按 `Ctrl-a`，再按 `d`，退出界面；pane 继续运行。再次运行 `wtable` 即可接回。
 
 默认状态目录为 `~/Library/Application Support/wtable`。可以设置 `WTABLE_HOME` 使用独立目录，例如：
 
 ```sh
 export WTABLE_HOME="$PWD/.dev/local"
-./bin/wtable
+wtable
 ```
 
 `WTABLE_HOME` 应使用较短的绝对路径，以满足 macOS Unix socket 的长度限制。同一个状态目录只运行一个 daemon、一个可写 TUI。
+
+## 工作区
+
+工作区就是你选择的绝对目录。每个工作区拥有自己的一套团队：前台 agent、worker、授权边、layer、任务和收件箱。切换工作区时，后台团队继续运行。
+
+- TUI 内按 `Ctrl-a w` 切换工作区。
+- `wtable --workspace PATH` 或 `WTABLE_WORKSPACE=PATH` 跳过启动选择器。
+- `wtable new` / `wtable recruit` 默认加入当前目录的工作区；`--workspace PATH` 可覆盖。
+- pane 名称只在工作区内唯一，不再全局唯一。跨工作区同名时请使用 pane ID 或指定 `--workspace`。
+- 工作区不会自动提升到 Git 仓库根：你打开哪个目录，就是哪个目录。
 
 ## 终端与 Agent
 
 在另一个终端中创建 pane。新会话在后台运行并出现在左栏；按 `Ctrl-a a` 选择打开：
 
 ```sh
-./bin/wtable new shell --dir "$PWD"
-./bin/wtable recruit coder -- codex
-./bin/wtable recruit reviewer -- claude
-./bin/wtable list
+wtable new shell --dir "$PWD"
+wtable recruit coder -- codex
+wtable recruit reviewer -- claude
+wtable list
 ```
 
 `--` 后的命令原样执行，不经过工作台的 shell 字符串解析。普通 CLI 使用 PTY 后端，显示它真实的终端界面。工作台不负责这些程序的安装和登录。
@@ -42,9 +58,9 @@ export WTABLE_HOME="$PWD/.dev/local"
 对于已安装的 ACP v1 适配器，使用：
 
 ```sh
-./bin/wtable recruit assistant --backend acp -- /absolute/path/to/acp-agent
-./bin/wtable send assistant '分析当前项目并给出实现建议'
-./bin/wtable tasks
+wtable recruit assistant --backend acp -- /absolute/path/to/acp-agent
+wtable send assistant '分析当前项目并给出实现建议'
+wtable tasks
 ```
 
 ACP 任务会自动执行，输出、工具步骤和权限请求显示在 TUI 中。只有明确选择权限选项才会响应；按 Enter 不会自动批准。没有打开 TUI 时，可运行 `permissions` 查看请求，再用 `approve REQUEST OPTION` 选择返回的选项 ID。
@@ -67,12 +83,12 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 内置预设包括 Shell、Codex PTY、Codex ACP、Claude PTY 和 Agy PTY。探测只检查本地二进制，并对已知程序运行限时 `--version`；不会修改登录态。未安装 `codex-acp` 时明确显示不可用，不自动下载。找到二进制不等于已验证登录或协议兼容。
 
 ```sh
-./bin/wtable presets
-./bin/wtable recruit coder --preset codex-pty --role '实现与验证' --brief
-./bin/wtable recruit reviewer --preset codex-acp --role '只读复核' --brief --connect coder
-./bin/wtable brief coder
-./bin/wtable brief send coder
-./bin/wtable pane edit --role '负责重试逻辑' coder
+wtable presets
+wtable recruit coder --preset codex-pty --role '实现与验证' --brief
+wtable recruit reviewer --preset codex-acp --role '只读复核' --brief --connect coder
+wtable brief coder
+wtable brief send coder
+wtable pane edit --role '负责重试逻辑' coder
 ```
 
 面板选择非 Shell 预设时默认启用身份说明；CLI 的 `--brief` 显式开启。说明不超过 2048 UTF-8 字节，保存在 `<WTABLE_HOME>/briefs/<pane>.md`，权限为 `0600`。启用时通过 `WTABLE_BRIEF` 暴露路径，并经 P0 闸门排队投递。内容包括身份、目录、角色、当前有权联系的 peer 和回报约定，不包含凭据。brief 是常驻说明，不是委派任务：不占用忙碌闸门，不出现在任务列表或收件箱，也不需要 `ack/result`。之后收到的正式任务仍按 PTY 的 `ack/result` 或 ACP 的回合结束自动回报。重启不会自动重放已有说明，可显式重发。
@@ -102,11 +118,11 @@ ACP pane 底部有常驻输入框，直接输入并按 Enter 即通过原任务�
 在 Agents 页按 `O` 打开角色库，可添加、编辑、删除模板。创建 Agent 时选择角色模板，默认预设、后端和目录可继续调整。模板保存在 `<WTABLE_HOME>/roles/<name>.md`；文件包含 `---` 元数据头（`name`、`preset`、`backend`、`cwd`）与 Markdown 指令正文。
 
 ```sh
-./bin/wtable role put --preset codex-pty reviewer ./review-instructions.md
-./bin/wtable role list
-./bin/wtable recruit reviewer --role-template reviewer --brief
-./bin/wtable pane edit --role-template reviewer existing-pane
-./bin/wtable role delete reviewer
+wtable role put --preset codex-pty reviewer ./review-instructions.md
+wtable role list
+wtable recruit reviewer --role-template reviewer --brief
+wtable pane edit --role-template reviewer existing-pane
+wtable role delete reviewer
 ```
 
 启动时保存指令正文与 SHA-256 快照。修改或删除模板不会改变已创建实例的指令；重启也保留快照。普通重命名不会刷新快照；显式选择另一个模板才更新，随后用 `b` 或 `brief send` 发送新说明。自由文本 `--role` 仍可使用。完整 brief 仍限 2 KiB。
@@ -199,11 +215,11 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 人类控制端可以向任意运行中的 pane 发送任务。pane 内的 agent 只能向显式连线的目标发送任务：
 
 ```sh
-./bin/wtable connect coder reviewer
-./bin/wtable send --key review-1 reviewer '检查当前修改'
-./bin/wtable tasks
-./bin/wtable task TASK_ID
-./bin/wtable wait --timeout 5m TASK_ID
+wtable connect coder reviewer
+wtable send --key review-1 reviewer '检查当前修改'
+wtable tasks
+wtable task TASK_ID
+wtable wait --timeout 5m TASK_ID
 ```
 
 连线是单向的；双向协作需要分别授权。`disconnect` 会取消这条边上尚未派发的任务，已执行的操作不会撤销。
@@ -213,10 +229,10 @@ Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` �
 送达方式按目标能力选择：ACP 目标使用 `prompt`，PTY 目标使用 `push`，不再由发送方身份决定。`--delivery pull`（兼容旧名 `claim`）只对声明支持领取的 pane 可用；`inject` 作为 `push` 的兼容别名。无投递字段的排队任务按 `push` 处理。
 
 ```sh
-./bin/wtable send --delivery push coder '检查当前修改'
-./bin/wtable send --delivery pull coder '等待主动领取的任务'
-./bin/wtable send --steer coder '再补跑一遍测试'
-./bin/wtable send --queue coder '闸门允许后再发送'
+wtable send --delivery push coder '检查当前修改'
+wtable send --delivery pull coder '等待主动领取的任务'
+wtable send --steer coder '再补跑一遍测试'
+wtable send --queue coder '闸门允许后再发送'
 ```
 
 Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等待权限确认的 pane 不接受 steer。发给空闲目标会直接报错而不是排队。若 turn 在投递前结束，已排队的 steer 会降级为普通 `push`，避免被插进之后一个无关的 turn。
@@ -224,7 +240,7 @@ Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等
 注入前会检查进程、阻塞文案、输出稳定时间和未结束的前一条注入任务。默认稳定窗口为 400ms，写后验证为 3s，ACK 超时为 90s。直接启动 `codex`、`claude`、`agy` 时使用内置阻塞文案；`gemini`、`opencode`、`grok` 和其他程序或包装脚本需要自行配置，暂不属于已验证的内置适配：
 
 ```sh
-./bin/wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
+wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
   --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
 ```
 
@@ -248,11 +264,11 @@ Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等
 ### 报告与后续任务
 
 ```sh
-./bin/wtable send --on-complete notify --report-to reviewer coder '分析并通知 reviewer'
-./bin/wtable send --on-complete handoff --report-to reviewer coder '完成后交给 reviewer 继续'
-./bin/wtable reports
-./bin/wtable report REPORT_ID
-./bin/wtable report seen REPORT_ID
+wtable send --on-complete notify --report-to reviewer coder '分析并通知 reviewer'
+wtable send --on-complete handoff --report-to reviewer coder '完成后交给 reviewer 继续'
+wtable reports
+wtable report REPORT_ID
+wtable report seen REPORT_ID
 ```
 
 `notify` 只写报告收件箱，绝不写入目标终端，也不创建新任务。`handoff` 创建带 `ParentTask` 的新任务，继承父任务的 `From` 和当前 `Origin`，并经过正常投递。授权始终按原 `From` 检查；父任务 `To` 与报告 `From` 记录执行者。没有汇报目标时默认 `none`；指定 `ReportTo` 而未指定模式时默认 `notify`。
@@ -262,14 +278,14 @@ Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等
 ### 人工处理
 
 ```sh
-./bin/wtable task confirm TASK_ID
-./bin/wtable task done TASK_ID '人工确认的实际结果'
-./bin/wtable task fail TASK_ID '失败原因'
-./bin/wtable task retry --to reviewer TASK_ID
-./bin/wtable cancel TASK_ID
+wtable task confirm TASK_ID
+wtable task done TASK_ID '人工确认的实际结果'
+wtable task fail TASK_ID '失败原因'
+wtable task retry --to reviewer TASK_ID
+wtable cancel TASK_ID
 # 确认 PTY 工作已停止后再执行，不把 Ctrl-C 当成停止证明。
 # 执行中的 pull 领取也用它释放 pane 队列。
-./bin/wtable cancel --confirmed TASK_ID
+wtable cancel --confirmed TASK_ID
 ```
 
 重发只接受失败、未知、取消或写入未确认的任务，保留原记录，并用 `RetryOf` 关联新任务。已在执行或排队的任务不能重发。重发写入未确认的任务时，原记录转为 `unknown` 并继续接受迟到结果；显式重发仍可能造成重复工作。
@@ -283,9 +299,9 @@ Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等
 ## Git worktree
 
 ```sh
-./bin/wtable layer create feature-a --dir /path/to/repo
-./bin/wtable layer list
-./bin/wtable recruit coder-a --layer feature-a -- codex
+wtable layer create feature-a --dir /path/to/repo
+wtable layer list
+wtable recruit coder-a --layer feature-a -- codex
 ```
 
 默认基准为存在的 `origin/main`，否则使用 `HEAD`；也可以用 `--base REF` 指定。新分支为 `wtable/layer/NAME`，目录保存在工作台状态目录下。
@@ -294,13 +310,13 @@ Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等
 
 ## 升级、恢复与诊断
 
-当前版本为 `0.4.0`。CLI 会检查 daemon 版本，不会把新投递参数交给旧 daemon 静默忽略。保留旧会话时，请为新版使用独立的 `WTABLE_HOME`；需要沿用原目录时，先结束旧会话并执行 `shutdown`，再启动新版。仅重新 attach 不会升级后台 daemon，`shutdown` 会停止该目录下的全部 pane。
+当前版本为 `0.5.0`。CLI 会检查 daemon 版本，不会把新投递参数交给旧 daemon 静默忽略。保留旧会话时，请为新版使用独立的 `WTABLE_HOME`；需要沿用原目录时，先结束旧会话并执行 `shutdown`，再启动新版。仅重新 attach 不会升级后台 daemon，`shutdown` 会停止该目录下的全部 pane。
 
 ```sh
-./bin/wtable diag
-./bin/wtable stop coder
-./bin/wtable restart coder
-./bin/wtable shutdown
+wtable diag
+wtable stop coder
+wtable restart coder
+wtable shutdown
 ```
 
 - TUI detach 后，daemon、PTY 和 agent 保持运行。
@@ -320,6 +336,8 @@ python3 scripts/p1_smoke.py --binary bin/wtable --output .dev/test-results/p1.js
 python3 scripts/p2_smoke.py --binary bin/wtable --output .dev/test-results/p2.json
 python3 scripts/scheduler_smoke.py --binary bin/wtable --output .dev/test-results/scheduler.json
 python3 scripts/view_smoke.py --binary bin/wtable --output .dev/test-results/view.json
+python3 scripts/first_run_smoke.py --binary bin/wtable --output .dev/test-results/first-run.json
+python3 scripts/workspace_smoke.py --binary bin/wtable --output .dev/test-results/workspace.json
 ```
 
 smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授权、任务去重、审批文件效果、worktree 隔离与崩溃恢复。ACP 部分使用本地确定性 fixture，不调用外部模型。测试会清理自建的进程和临时目录，并保留 JSON 验收报告。
@@ -337,7 +355,7 @@ smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授�
 - 使用完整 cell 快照轮询，尚未实现 cell 差分与事件重放；原计划中的性能预算尚未验收。
 - 支持可见内容的鼠标选区复制、键盘回看和复制可见屏；支持向启用鼠标协议的应用转发滚轮，暂不转发点击和拖动，也不支持 OSC 52 剪贴板协议。
 - 主画布选择由服务端 `last_focus` 记录，attach 时恢复；工具槽及其比例不持久化。左栏顺序为稳定的创建顺序。
-- 最多保留 32 个 pane、2,000 条任务，prompt 与 result 合计上限 64 MiB；pane 可从 Agents 页移除，任务历史尚无清理命令。结构化聊天视图有大小上限，完整任务结果单独保存。
+- 每个工作区最多保留 32 个 pane（全局 128 个）、2,000 条任务，prompt 与 result 合计上限 64 MiB；pane 可从 Agents 页移除，任务历史尚无清理命令。结构化聊天视图有大小上限，完整任务结果单独保存。
 - notes、内置编辑器、账号池、计划任务、图片和浏览器门户属于后续范围。
 
 当前实现完成 P0 送达与回传、P1 控制面板和身份说明接入，以及 P2 Graph v1。`docs/`、`.dev/` 和 `bin/` 均由 Git 白名单规则忽略。

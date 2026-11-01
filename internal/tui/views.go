@@ -198,13 +198,14 @@ func (u *ui) toggleUtility() {
 		cwd = p.Cwd
 	}
 	shell := model.SpawnParams{
-		Name:    u.autoAgentName("shell"),
-		Kind:    model.PaneWorker,
-		Backend: "pty",
-		Cwd:     cwd,
-		Layer:   u.activeLayer,
-		Cols:    80,
-		Rows:    24,
+		Name:      u.autoAgentName("shell"),
+		Kind:      model.PaneWorker,
+		Backend:   "pty",
+		Cwd:       cwd,
+		Workspace: u.workspace,
+		Layer:     u.activeLayer,
+		Cols:      80,
+		Rows:      24,
 	}
 	var pane model.Pane
 	if !u.callWithin(10e9, "pane.spawn", shell, &pane) {

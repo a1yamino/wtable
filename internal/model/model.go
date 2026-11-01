@@ -97,6 +97,7 @@ type PaneUpdate struct {
 	Name         string  `json:"name"`
 	Role         string  `json:"role"`
 	Account      string  `json:"account"`
+	Workspace    string  `json:"workspace,omitempty"`
 }
 
 // Pane kinds separate the pane a human talks to from background workers.
@@ -123,6 +124,7 @@ type Pane struct {
 	Unread           int            `json:"unread,omitempty"`
 	Command          []string       `json:"command"`
 	Cwd              string         `json:"cwd"`
+	Workspace        string         `json:"workspace,omitempty"`
 	State            string         `json:"state"` // starting, running, exited, failed, interrupted
 	TurnState        string         `json:"turn_state,omitempty"`
 	SessionID        string         `json:"session_id,omitempty"`
@@ -190,6 +192,7 @@ type Task struct {
 	Prompt         string     `json:"prompt"`
 	Kind           string     `json:"kind,omitempty"` // chat, delegation, handoff, brief
 	State          string     `json:"state"`          // queued, delivered, accepted, completed, failed, unknown, cancelling, cancelled
+	Workspace      string     `json:"workspace,omitempty"`
 	DeliveryMode   string     `json:"delivery_mode,omitempty"`
 	DeliveryStatus string     `json:"delivery_status,omitempty"`
 	DeliveryError  string     `json:"delivery_error,omitempty"`
@@ -217,6 +220,7 @@ type SendParams struct {
 	To             string `json:"to"`
 	Prompt         string `json:"prompt"`
 	Kind           string `json:"kind,omitempty"`
+	Workspace      string `json:"workspace,omitempty"`
 	DedupeKey      string `json:"dedupe_key,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	DeliveryMode   string `json:"delivery_mode,omitempty"`
@@ -298,23 +302,46 @@ type InboxItem struct {
 }
 
 type Layer struct {
-	Name   string `json:"name"`
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
-	Repo   string `json:"repo"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Branch    string `json:"branch"`
+	Repo      string `json:"repo"`
+	Workspace string `json:"workspace,omitempty"`
+}
+
+// Workspace is a directory that owns one independent agent team. It is
+// deliberately not promoted to a Git root: the path the human opened is the
+// path they get.
+type Workspace struct {
+	Path       string    `json:"path"`
+	LastOpened time.Time `json:"last_opened"`
+	LastFocus  string    `json:"last_focus,omitempty"`
+}
+
+// WorkspaceInfo is the wire shape for the picker. Counts are computed on each
+// snapshot instead of persisted so they cannot go stale.
+type WorkspaceInfo struct {
+	Path         string    `json:"path"`
+	LastOpened   time.Time `json:"last_opened"`
+	LastFocus    string    `json:"last_focus,omitempty"`
+	PaneCount    int       `json:"pane_count"`
+	RunningCount int       `json:"running_count"`
+	Missing      bool      `json:"missing,omitempty"`
 }
 
 type Snapshot struct {
-	Panes       []Pane       `json:"panes"`
-	Tasks       []Task       `json:"tasks"`
-	Edges       []Edge       `json:"edges"`
-	Layers      []Layer      `json:"layers"`
-	Permissions []Permission `json:"permissions"`
-	Reports     []Report     `json:"reports"`
-	Inbox       []InboxItem  `json:"inbox,omitempty"`
-	Graph       *Graph       `json:"graph,omitempty"`
-	LastFocus   string       `json:"last_focus,omitempty"`
-	Revision    uint64       `json:"revision"`
+	Panes       []Pane          `json:"panes"`
+	Tasks       []Task          `json:"tasks"`
+	Edges       []Edge          `json:"edges"`
+	Layers      []Layer         `json:"layers"`
+	Permissions []Permission    `json:"permissions"`
+	Reports     []Report        `json:"reports"`
+	Inbox       []InboxItem     `json:"inbox,omitempty"`
+	Graph       *Graph          `json:"graph,omitempty"`
+	Workspaces  []WorkspaceInfo `json:"workspaces,omitempty"`
+	Workspace   string          `json:"workspace,omitempty"`
+	LastFocus   string          `json:"last_focus,omitempty"`
+	Revision    uint64          `json:"revision"`
 }
 
 type SpawnParams struct {
@@ -330,6 +357,7 @@ type SpawnParams struct {
 	Backend        string         `json:"backend"`
 	Command        []string       `json:"command"`
 	Cwd            string         `json:"cwd"`
+	Workspace      string         `json:"workspace,omitempty"`
 	Cols           int            `json:"cols"`
 	Rows           int            `json:"rows"`
 	DeliveryConfig DeliveryConfig `json:"delivery_config,omitempty"`

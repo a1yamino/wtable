@@ -25,6 +25,7 @@ type ui struct {
 	client                 *rpc.Client
 	screen                 tcell.Screen
 	cwd                    string
+	workspace              string
 	snapshot               model.Snapshot
 	focus                  int
 	prefix, help, copyMode bool
@@ -69,6 +70,7 @@ type ui struct {
 	palette          *paletteView
 	create           *createView
 	queueView        *queueView
+	workspacePicker  *workspacePickerView
 	interruptConfirm bool
 	lastSent         map[string]string
 	seenGlyphs       map[string]bool
@@ -87,7 +89,8 @@ type ui struct {
 }
 
 // Run attaches the control UI. Leaving the UI detaches; daemon panes keep running.
-func Run(ctx context.Context, client *rpc.Client, cwd string) error {
+// preferredWorkspace, when non-empty, skips the startup picker.
+func Run(ctx context.Context, client *rpc.Client, cwd, preferredWorkspace string) error {
 	if err := client.Call(ctx, "ui.attach", struct{}{}, nil); err != nil {
 		return err
 	}
@@ -113,17 +116,19 @@ func Run(ctx context.Context, client *rpc.Client, cwd string) error {
 		defer cancel()
 		_ = u.client.Call(detachCtx, "ui.detach", struct{}{}, nil)
 	}()
-	if _, err = u.refresh(); err != nil {
-		return err
+	if preferredWorkspace != "" {
+		if !u.applyWorkspace(preferredWorkspace, "startup") {
+			msg := u.status
+			if msg == "" {
+				msg = "无法打开工作区 " + preferredWorkspace
+			}
+			return errors.New(msg)
+		}
+	} else {
+		u.openWorkspacePicker("startup")
+		u.resize()
+		u.draw()
 	}
-	u.syncCanvas()
-	if len(u.snapshot.Panes) == 0 {
-		u.openCreate(model.PaneForeground)
-	} else if u.canvas.main != "" {
-		u.markFocusedSeen(u.canvas.main)
-	}
-	u.resize()
-	u.draw()
 	ticker := time.NewTicker(time.Second / 30)
 	defer ticker.Stop()
 	for {
@@ -272,6 +277,9 @@ func (u *ui) callWithin(timeout time.Duration, method string, args, out any) boo
 }
 
 func (u *ui) refresh() (bool, error) {
+	if u.workspace == "" {
+		return false, nil
+	}
 	ids := make([]string, 0, len(u.boxes))
 	for id := range u.boxes {
 		ids = append(ids, id)
@@ -281,7 +289,8 @@ func (u *ui) refresh() (bool, error) {
 	defer cancel()
 	// Frames are requested only for the panes actually drawn. Background panes
 	// keep their last size and stay cheap to poll.
-	if err := u.client.Call(ctx, "state.get", map[string]any{"offsets": u.offsets, "ids": ids, "graph": true, "frames": u.graph == nil && u.panel == nil && !u.taskView}, &next); err != nil {
+	params := map[string]any{"offsets": u.offsets, "ids": ids, "graph": true, "frames": u.graph == nil && u.panel == nil && !u.taskView, "workspace": u.workspace}
+	if err := u.client.Call(ctx, "state.get", params, &next); err != nil {
 		return false, err
 	}
 	changed := !reflect.DeepEqual(u.snapshot, next)
@@ -337,7 +346,7 @@ func (u *ui) send(data string) {
 
 func (u *ui) handlePaste(data string) {
 	u.selection = nil
-	if u.graph != nil || u.palette != nil || u.create != nil || u.queueView != nil || u.area == focusRail || u.area == focusApproval {
+	if u.graph != nil || u.palette != nil || u.create != nil || u.queueView != nil || u.workspacePicker != nil || u.area == focusRail || u.area == focusApproval {
 		return
 	}
 	if u.panel != nil && !u.taskView && u.mode == "" {
@@ -403,6 +412,10 @@ func (u *ui) key(e *tcell.EventKey) bool {
 	if u.mode != "" {
 		u.edit(e)
 		return false
+	}
+	if u.workspacePicker != nil {
+		u.workspacePickerKey(e)
+		return u.quit
 	}
 	if u.actions != nil {
 		u.actionKey(e)
@@ -569,6 +582,8 @@ func (u *ui) prefixKey(e *tcell.EventKey) bool {
 		u.openCreate(model.PaneWorker)
 	case "b":
 		u.openPanel(2)
+	case "w":
+		u.openWorkspacePicker("switch")
 	case "q", "d":
 		return true
 	default:
@@ -635,6 +650,18 @@ func (u *ui) edit(e *tcell.EventKey) {
 				return
 			}
 			u.spawnShell([]string{"/bin/zsh", "-lc", input})
+		case "workspace":
+			if strings.TrimSpace(input) == "" {
+				u.status = "请输入工作区目录"
+				return
+			}
+			purpose := "switch"
+			if u.workspacePicker != nil {
+				purpose = u.workspacePicker.purpose
+			}
+			if !u.applyWorkspace(input, purpose) {
+				return
+			}
 		case "task":
 			u.submitTaskComposer(input)
 			return
@@ -665,7 +692,7 @@ func (u *ui) edit(e *tcell.EventKey) {
 			if mode == "unedge" {
 				method = "edge.remove"
 			}
-			if !u.call(method, map[string]string{"from": fields[0], "to": fields[1]}, nil) {
+			if !u.call(method, map[string]string{"from": fields[0], "to": fields[1], "workspace": u.workspace}, nil) {
 				return
 			}
 		case "stop":

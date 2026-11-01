@@ -734,7 +734,7 @@ func (u *ui) submitPanelForm() {
 	}
 	switch p.form {
 	case "agent":
-		args := model.SpawnParams{Name: strings.TrimSpace(value("name")), Preset: value("preset"), Backend: value("backend"), Cwd: value("cwd"), Layer: value("layer"), Role: value("role"), RoleTemplate: value("role_template"), Account: value("account"), InjectBrief: value("brief") == "true", ConnectTo: p.get("connect").values(), Cols: 80, Rows: 24}
+		args := model.SpawnParams{Name: strings.TrimSpace(value("name")), Preset: value("preset"), Backend: value("backend"), Cwd: value("cwd"), Workspace: u.workspace, Layer: value("layer"), Role: value("role"), RoleTemplate: value("role_template"), Account: value("account"), InjectBrief: value("brief") == "true", ConnectTo: p.get("connect").values(), Cols: 80, Rows: 24}
 		if args.Name == "" {
 			u.status = "请填写 Agent 名字"
 			return
@@ -768,11 +768,11 @@ func (u *ui) submitPanelForm() {
 		if p.roleChanged {
 			selectedRole = &roleTemplate
 		}
-		u.panelAsync("pane.update", model.PaneUpdate{ID: p.targetID, Name: strings.TrimSpace(value("name")), Role: value("role"), RoleTemplate: selectedRole, Account: value("account")})
+		u.panelAsync("pane.update", model.PaneUpdate{ID: p.targetID, Workspace: u.workspace, Name: strings.TrimSpace(value("name")), Role: value("role"), RoleTemplate: selectedRole, Account: value("account")})
 	case "role":
 		u.panelAsync("role.put", model.RoleTemplate{Name: strings.TrimSpace(value("name")), Instructions: value("instructions"), Preset: value("preset"), Backend: value("backend"), Cwd: value("cwd")})
 	case "layer":
-		u.panelAsync("layer.create", map[string]string{"name": strings.TrimSpace(value("name")), "cwd": value("cwd"), "base": value("base")})
+		u.panelAsync("layer.create", map[string]string{"name": strings.TrimSpace(value("name")), "cwd": value("cwd"), "base": value("base"), "workspace": u.workspace})
 	case "edge":
 		from := value("from")
 		targets := p.get("targets")
@@ -815,7 +815,7 @@ func (u *ui) submitPanelForm() {
 					mode = "prompt"
 				}
 			}
-			args := model.SendParams{To: to, Prompt: value("prompt"), DeliveryMode: mode, Queue: value("queue") == "true", OnComplete: value("complete")}
+			args := model.SendParams{To: to, Workspace: u.workspace, Prompt: value("prompt"), DeliveryMode: mode, Queue: value("queue") == "true", OnComplete: value("complete")}
 			if args.OnComplete != "none" {
 				args.ReportTo = value("report")
 			}
@@ -1057,6 +1057,7 @@ func (u *ui) createFromPreset(preset model.Preset) {
 		Preset:      preset.ID,
 		Backend:     preset.Backend,
 		Cwd:         cwd,
+		Workspace:   u.workspace,
 		Layer:       u.activeLayer,
 		InjectBrief: preset.ID != "shell",
 		ConnectTo:   connect,

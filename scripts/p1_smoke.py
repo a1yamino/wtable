@@ -123,6 +123,8 @@ def run(args):
             rpc.call("task.done", {"id": p["brief_task"], "result": "fixture read brief"})
             return p
 
+        wait_until(lambda: shown("选择工作区"), "workspace picker")
+        send(b"\r")
         wait_until(lambda: shown("seed"), "initial TUI")
         open_panel(); ready_panel()
         presets = rpc.call("preset.list")["presets"]

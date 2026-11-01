@@ -50,7 +50,7 @@ func TestStateFrameSelectionAndPeek(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.stop(pane.ID)
+	defer s.stop(pane.ID, "")
 	for _, tc := range []struct {
 		raw   string
 		frame bool
@@ -120,7 +120,7 @@ func TestPaneMetadataRedactsCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.stop(pane.ID)
+	defer s.stop(pane.ID, "")
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		snap, err := s.snapshot(json.RawMessage(`{"frames":false}`))

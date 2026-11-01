@@ -97,7 +97,7 @@ func TestSpawnBriefProfileAndDiagnostics(t *testing.T) {
 	s := onboardingServer(t)
 	secret := "private-profile-value-12345"
 	writeProfiles(t, s, []accountProfile{{Name: "work", Env: map[string]string{"AGENT_SECRET": secret}}})
-	s.state.Panes = []model.Pane{{ID: "peer", Name: "Peer", Backend: "pty", State: "running"}}
+	s.state.Panes = []model.Pane{{ID: "peer", Name: "Peer", Backend: "pty", State: "running", Workspace: s.paths.Home, Cwd: s.paths.Home}}
 	// A local shell fixture emits its selected profile and brief path, then fails.
 	p, err := s.spawn(model.SpawnParams{Name: "fixture", Role: "Review", Account: "work", Cwd: s.paths.Home, Command: []string{"/bin/sh", "-c", "printf '%s\\n' \"$AGENT_SECRET\" \"$WTABLE_BRIEF\"; exit 7"}, InjectBrief: true, ConnectTo: []string{"Peer"}}, "")
 	if err != nil {
@@ -154,7 +154,7 @@ func TestPaneUpdateRemoveAndControllerBoundary(t *testing.T) {
 			t.Fatalf("peer can invoke %s", method)
 		}
 	}
-	if err := s.removePane("worker"); err != nil {
+	if err := s.removePane("worker", ""); err != nil {
 		t.Fatal(err)
 	}
 	s.paneExited("worker", "run", 1, nil)
@@ -187,7 +187,7 @@ func TestSpawnValidationAndBriefQueueRestart(t *testing.T) {
 	s.mu.Lock()
 	s.state.Tasks[0].State = "unknown"
 	s.mu.Unlock()
-	if err := s.stop(p.ID); err != nil {
+	if err := s.stop(p.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -211,13 +211,13 @@ func TestSpawnValidationAndBriefQueueRestart(t *testing.T) {
 	if len(s.state.Tasks) != 1 || restarted.BriefTask != p.BriefTask || restarted.BriefPath != p.BriefPath || !restarted.InjectBrief {
 		t.Fatal("restart replayed or lost brief metadata")
 	}
-	if _, err := s.paneBrief(p.ID, true); err != nil {
+	if _, err := s.paneBrief(p.ID, "", true); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.state.Tasks) != 2 || s.state.Tasks[1].State != "queued" {
 		t.Fatal("explicit brief resend not queued")
 	}
-	if err := s.removePane(p.ID); err != nil {
+	if err := s.removePane(p.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -307,7 +307,7 @@ func TestRoleSnapshotSurvivesTemplateUpdatesAndBriefReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.removePane(p.ID)
+	defer s.removePane(p.ID, "")
 	if p.RoleTemplate != role.Name || p.Role != role.Name || p.RoleInstructions != role.Instructions || p.RoleHash != roleHash(role.Instructions) {
 		t.Fatalf("missing role snapshot: %+v", p)
 	}
@@ -316,7 +316,7 @@ func TestRoleSnapshotSurvivesTemplateUpdatesAndBriefReads(t *testing.T) {
 	if _, err := s.putRole(role); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.paneBrief(p.ID, false); err != nil {
+	if _, err := s.paneBrief(p.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
 	// Saving a metadata edit with the same selected template must not refresh it.
@@ -335,10 +335,10 @@ func TestRoleSnapshotSurvivesTemplateUpdatesAndBriefReads(t *testing.T) {
 	if renamed.Name != "renamed-review" || renamed.RoleTemplate != p.RoleTemplate || renamed.RoleInstructions != p.RoleInstructions || renamed.RoleHash != originalHash {
 		t.Fatalf("omitted role_template erased startup snapshot: %+v", renamed)
 	}
-	if _, err := s.paneBrief(p.ID, false); err != nil {
+	if _, err := s.paneBrief(p.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.stop(p.ID); err != nil {
+	if err := s.stop(p.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)

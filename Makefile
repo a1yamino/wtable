@@ -1,7 +1,17 @@
-.PHONY: build test smoke check tui tui-fixtures dev dev-down dev-clean
+.PHONY: build test smoke check tui tui-fixtures dev dev-down dev-clean install uninstall
+
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
 
 build:
 	go build -o bin/wtable ./cmd/wtable
+
+install: build
+	mkdir -p "$(BINDIR)"
+	install -m 0755 bin/wtable "$(BINDIR)/wtable"
+
+uninstall:
+	rm -f "$(BINDIR)/wtable"
 
 test:
 	go test -race ./internal/terminal ./internal/agent ./internal/server
@@ -32,6 +42,7 @@ smoke: build
 	python3 scripts/scheduler_smoke.py --binary bin/wtable --output .dev/test-results/scheduler.json
 	python3 scripts/view_smoke.py --binary bin/wtable --output .dev/test-results/view.json
 	python3 scripts/first_run_smoke.py --binary bin/wtable --output .dev/test-results/first-run.json
+	python3 scripts/workspace_smoke.py --binary bin/wtable --output .dev/test-results/workspace.json
 
 check:
 	go vet ./...

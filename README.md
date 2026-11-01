@@ -10,31 +10,47 @@ This MVP runs terminal CLIs side by side, connects to structured agent sessions 
 
 Requires Go 1.27 or later. Git features require a local Git installation. Agents use their own installed executables and login configurations.
 
+Install the command once, then run it from any directory:
+
 ```sh
-go build -o bin/wtable ./cmd/wtable
-./bin/wtable
+make install                 # builds and installs to ~/.local/bin/wtable
+# make install PREFIX=/usr/local
+# or: go install ./cmd/wtable
+wtable
 ```
 
-The first launch starts a local daemon and opens the PTY foreground picker; one `Enter` creates the agent you talk to. Press `Ctrl-a`, then `q`, to leave the interface while keeping panes running. Run `./bin/wtable` again to reattach and restore the last focused pane.
+`make install` uses `~/.local/bin` by default; make sure that directory is on your `PATH`. From a source checkout you can also run `./bin/wtable` without installing.
+
+The first launch starts a local daemon and asks which workspace (directory) to open. The current directory is the first row; recently opened workspaces follow, with the last one preselected. `Enter` opens it, then the PTY foreground picker appears if that workspace has no agents yet. Press `Ctrl-a`, then `d`, to leave the interface while keeping panes running. Run `wtable` again to reattach.
 
 State is stored in `~/Library/Application Support/wtable` by default. Set `WTABLE_HOME` to use an independent state directory:
 
 ```sh
 export WTABLE_HOME="$PWD/.dev/local"
-./bin/wtable
+wtable
 ```
 
 Use a short absolute path for `WTABLE_HOME` to stay within the macOS Unix socket path limit. Each state directory supports one daemon and one writable TUI client.
+
+## Workspaces
+
+A workspace is the absolute directory you choose. Each workspace owns its own team: foreground agent, workers, authorization edges, layers, tasks, and inbox. Background teams keep running while another workspace is in view.
+
+- `Ctrl-a w` switches workspaces from inside the TUI.
+- `wtable --workspace PATH` or `WTABLE_WORKSPACE=PATH` skips the startup picker.
+- `wtable new` and `wtable recruit` join the current directory's workspace by default; `--workspace PATH` overrides it.
+- Pane names are unique within a workspace, not across the daemon. Use pane IDs (or `--workspace`) when a name exists in more than one team.
+- A workspace is never promoted to a Git root: open the directory you actually mean.
 
 ## Terminals and agents
 
 Create panes from another terminal. New sessions run in the background and appear in the rail; press `Ctrl-a a` and choose one to open it:
 
 ```sh
-./bin/wtable new shell --dir "$PWD"
-./bin/wtable recruit coder -- codex
-./bin/wtable recruit reviewer -- claude
-./bin/wtable list
+wtable new shell --dir "$PWD"
+wtable recruit coder -- codex
+wtable recruit reviewer -- claude
+wtable list
 ```
 
 The command after `--` is executed directly, without shell string parsing by the workbench. Ordinary CLIs use the PTY backend and display their actual terminal interface. Install and authenticate these programs separately.
@@ -42,9 +58,9 @@ The command after `--` is executed directly, without shell string parsing by the
 For an installed ACP v1 adapter, use:
 
 ```sh
-./bin/wtable recruit assistant --backend acp -- /absolute/path/to/acp-agent
-./bin/wtable send assistant 'Analyze this project and suggest an implementation approach'
-./bin/wtable tasks
+wtable recruit assistant --backend acp -- /absolute/path/to/acp-agent
+wtable send assistant 'Analyze this project and suggest an implementation approach'
+wtable tasks
 ```
 
 ACP tasks are dispatched automatically. Output, tool activity, and permission requests appear in the TUI. Permission requests require an explicit option selection; pressing Enter does not approve them. Without an open TUI, run `permissions` to inspect requests, then use `approve REQUEST OPTION` with one of the returned option IDs.
@@ -67,12 +83,12 @@ Creation includes preset, PTY/ACP backend, directory, layer, role, account profi
 Built-in presets are Shell, Codex PTY, Codex ACP, Claude PTY, and Agy PTY. Discovery checks local executables and runs bounded `--version` probes only for known programs without changing login state. A missing `codex-acp` adapter is shown as unavailable and never downloaded automatically. Finding a binary does not establish authentication or protocol compatibility.
 
 ```sh
-./bin/wtable presets
-./bin/wtable recruit coder --preset codex-pty --role 'Implement and validate' --brief
-./bin/wtable recruit reviewer --preset codex-acp --role 'Read-only review' --brief --connect coder
-./bin/wtable brief coder
-./bin/wtable brief send coder
-./bin/wtable pane edit --role 'Own retry logic' coder
+wtable presets
+wtable recruit coder --preset codex-pty --role 'Implement and validate' --brief
+wtable recruit reviewer --preset codex-acp --role 'Read-only review' --brief --connect coder
+wtable brief coder
+wtable brief send coder
+wtable pane edit --role 'Own retry logic' coder
 ```
 
 The panel enables briefs by default for non-Shell presets; the CLI requires `--brief`. Briefs are at most 2048 UTF-8 bytes, stored in `<WTABLE_HOME>/briefs/<pane>.md` with mode `0600`. Enabling one exposes `WTABLE_BRIEF` and queues it through the P0 delivery gate. Content includes identity, directory, role, authorized outgoing peers, and reporting instructions without credentials. A brief is standing instructions, not a delegated task: it never occupies the busy gate, never appears in Tasks or the inbox, and needs no ack/result. Later work still requires ack/result on PTY; ACP completes on turn end. Restart does not automatically replay a previous brief; resend explicitly when needed.
@@ -110,11 +126,11 @@ Each rail row shows exactly one primary signal: approval (`⏳`), exit (`✕`), 
 Agents `O` opens role template CRUD. Templates live at `<WTABLE_HOME>/roles/<name>.md`, with a `---` metadata header containing `name`, optional `preset`, `backend`, and `cwd`, followed by Markdown instructions. Launch snapshots the instructions and their SHA-256 hash; template edits/deletion and pane restarts retain the existing snapshot. Plain renames preserve it. Selecting a different template captures new instructions; explicitly resend the brief to deliver them. Free-text `--role` remains supported and the entire brief is still capped at 2 KiB.
 
 ```sh
-./bin/wtable role put --preset codex-pty reviewer ./review-instructions.md
-./bin/wtable role list
-./bin/wtable recruit reviewer --role-template reviewer --brief
-./bin/wtable pane edit --role-template reviewer existing-pane
-./bin/wtable role delete reviewer
+wtable role put --preset codex-pty reviewer ./review-instructions.md
+wtable role list
+wtable recruit reviewer --role-template reviewer --brief
+wtable pane edit --role-template reviewer existing-pane
+wtable role delete reviewer
 ```
 
 Account `env` values accept legacy strings or exactly one of `literal`, `env_ref`, and `keychain_ref`. References resolve at launch and resolved values are never written back. On macOS, keychain references read existing items using `/usr/bin/security`; wtable does not create or modify items.
@@ -195,11 +211,11 @@ Ordinary keystrokes go directly to the PTY. Multiline paste requires confirmatio
 The human controller can send tasks to any running pane. An agent inside a pane can send tasks only to explicitly linked destinations:
 
 ```sh
-./bin/wtable connect coder reviewer
-./bin/wtable send --key review-1 reviewer 'Review the current changes'
-./bin/wtable tasks
-./bin/wtable task TASK_ID
-./bin/wtable wait --timeout 5m TASK_ID
+wtable connect coder reviewer
+wtable send --key review-1 reviewer 'Review the current changes'
+wtable tasks
+wtable task TASK_ID
+wtable wait --timeout 5m TASK_ID
 ```
 
 Links are directional. Authorize each direction separately for two-way collaboration. `disconnect` cancels tasks on that link that have not yet been dispatched; it does not undo actions already taken.
@@ -209,10 +225,10 @@ Links are directional. Authorize each direction separately for two-way collabora
 Delivery defaults follow the target's capabilities: ACP targets use `prompt`, PTY targets use `push`, and the sender no longer changes that choice. `--delivery pull` (legacy `claim`) remains available only for panes that declare pull; `inject` is accepted as an alias for `push`. Queued tasks without a delivery field are treated as `push`.
 
 ```sh
-./bin/wtable send --delivery push coder 'Review these changes'
-./bin/wtable send --delivery pull coder 'Work to claim explicitly'
-./bin/wtable send --steer coder 'Also check the tests'
-./bin/wtable send --queue coder 'Deliver once the gate allows it'
+wtable send --delivery push coder 'Review these changes'
+wtable send --delivery pull coder 'Work to claim explicitly'
+wtable send --steer coder 'Also check the tests'
+wtable send --queue coder 'Deliver once the gate allows it'
 ```
 
 Steering is accepted only when the target is currently executing a turn and declares `push_steer`. A pane waiting for permission is not considered free for steering. Sending to an idle pane is rejected rather than queued; if the turn ends before delivery, a queued steer is downgraded to ordinary `push` so it cannot be injected into a later, unrelated turn.
@@ -220,7 +236,7 @@ Steering is accepted only when the target is currently executing a turn and decl
 Injection checks process liveness, blocked text, output settling, and previous unfinished injection. Defaults are 400ms settling, 3s verification, and 90s ACK timeout. Direct `codex`, `claude`, and `agy` commands use built-in blocked-text patterns. `gemini`, `opencode`, `grok`, and other programs or wrappers require explicit configuration; they are not validated built-in adapters:
 
 ```sh
-./bin/wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
+wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
   --tail-lines 12 --settle 400ms --verify 3s --ack-timeout 90s -- codex
 ```
 
@@ -243,11 +259,11 @@ Results can also be submitted through stdin. Delivered, accepted, unknown, cance
 ### Reports and follow-up work
 
 ```sh
-./bin/wtable send --on-complete notify --report-to reviewer coder 'Analyze and notify reviewer'
-./bin/wtable send --on-complete handoff --report-to reviewer coder 'Prepare work for reviewer'
-./bin/wtable reports
-./bin/wtable report REPORT_ID
-./bin/wtable report seen REPORT_ID
+wtable send --on-complete notify --report-to reviewer coder 'Analyze and notify reviewer'
+wtable send --on-complete handoff --report-to reviewer coder 'Prepare work for reviewer'
+wtable reports
+wtable report REPORT_ID
+wtable report seen REPORT_ID
 ```
 
 `notify` writes only an inbox report: no terminal input and no new task. `handoff` creates a task with `ParentTask`, inheriting the parent's `From` and current `Origin` and applying normal delivery checks. Authorization always uses the original `From`; the parent's `To` and the report's `From` identify the executor. No report target defaults to `none`; specifying a target without a mode defaults to `notify`.
@@ -257,14 +273,14 @@ The original sender's grant to the report target is checked at creation and comp
 ### Manual recovery
 
 ```sh
-./bin/wtable task confirm TASK_ID
-./bin/wtable task done TASK_ID 'Actual outcome confirmed by a person'
-./bin/wtable task fail TASK_ID 'Failure reason'
-./bin/wtable task retry --to reviewer TASK_ID
-./bin/wtable cancel TASK_ID
+wtable task confirm TASK_ID
+wtable task done TASK_ID 'Actual outcome confirmed by a person'
+wtable task fail TASK_ID 'Failure reason'
+wtable task retry --to reviewer TASK_ID
+wtable cancel TASK_ID
 # Run only after confirming the PTY work has stopped. Also releases a running
 # pull claim so the pane queue can continue.
-./bin/wtable cancel --confirmed TASK_ID
+wtable cancel --confirmed TASK_ID
 ```
 
 Retry accepts failed, unknown, cancelled, or write-unconfirmed tasks, preserves the original record, and links a new task through `RetryOf`. Queued or executing tasks cannot be retried. Retrying write-unconfirmed work marks the old record unknown and still accepts its late result; explicit retry can duplicate work.
@@ -276,9 +292,9 @@ Links restrict workbench API access, not direct file access by the same operatin
 ## Git worktrees
 
 ```sh
-./bin/wtable layer create feature-a --dir /path/to/repo
-./bin/wtable layer list
-./bin/wtable recruit coder-a --layer feature-a -- codex
+wtable layer create feature-a --dir /path/to/repo
+wtable layer list
+wtable recruit coder-a --layer feature-a -- codex
 ```
 
 The default base is `origin/main` when it exists, otherwise `HEAD`. Use `--base REF` to choose another reference. The new branch is named `wtable/layer/NAME`, and its working directory is stored beneath the workbench state directory.
@@ -287,13 +303,13 @@ Run `wtable changes` or `wtable diff [PATH]` from the target repository to inspe
 
 ## Upgrading, recovery, and diagnostics
 
-The current version is `0.4.0`. The CLI checks the daemon version rather than silently sending new delivery options to an old daemon. Use a separate `WTABLE_HOME` to keep existing sessions running. To reuse a state directory, finish its old sessions, run `shutdown`, then start the new version. Reattaching does not upgrade the daemon; shutdown stops every pane in that state directory.
+The current version is `0.5.0`. The CLI checks the daemon version rather than silently sending new delivery options to an old daemon. Use a separate `WTABLE_HOME` to keep existing sessions running. To reuse a state directory, finish its old sessions, run `shutdown`, then start the new version. Reattaching does not upgrade the daemon; shutdown stops every pane in that state directory.
 
 ```sh
-./bin/wtable diag
-./bin/wtable stop coder
-./bin/wtable restart coder
-./bin/wtable shutdown
+wtable diag
+wtable stop coder
+wtable restart coder
+wtable shutdown
 ```
 
 - Detaching the TUI leaves the daemon, PTYs, and agents running.
@@ -313,6 +329,8 @@ python3 scripts/p1_smoke.py --binary bin/wtable --output .dev/test-results/p1.js
 python3 scripts/p2_smoke.py --binary bin/wtable --output .dev/test-results/p2.json
 python3 scripts/scheduler_smoke.py --binary bin/wtable --output .dev/test-results/scheduler.json
 python3 scripts/view_smoke.py --binary bin/wtable --output .dev/test-results/view.json
+python3 scripts/first_run_smoke.py --binary bin/wtable --output .dev/test-results/first-run.json
+python3 scripts/workspace_smoke.py --binary bin/wtable --output .dev/test-results/workspace.json
 ```
 
 The smoke script uses a real daemon, PTYs, SQLite, and temporary Git repositories. It asserts authorization behavior, task deduplication, approval effects on files, worktree isolation, and crash recovery. ACP checks use a deterministic local fixture and make no external model calls. The script cleans up its own processes and temporary directories and saves a JSON validation report.
@@ -330,7 +348,7 @@ External provider authentication, adapter compatibility, and session recovery mu
 - The TUI polls full cell snapshots; cell deltas and event replay are not implemented. The original performance targets have not been validated.
 - Mouse selection and copying visible content are supported, alongside keyboard scrollback and copying the visible screen. Wheel forwarding to mouse-aware applications is supported; click/drag forwarding and the OSC 52 clipboard protocol are not supported.
 - The main canvas selection is persisted as `last_focus` and restored on attach; the utility slot and its ratio are not persisted. The rail order is stable creation order.
-- Up to 32 panes and 2,000 task records are retained, with a 64 MiB aggregate prompt/result budget. Panes can be removed from Agents; task history has no cleanup command. The structured chat view is bounded, while complete task results are stored separately.
+- Up to 32 panes per workspace (128 total) and 2,000 task records are retained, with a 64 MiB aggregate prompt/result budget. Panes can be removed from Agents; task history has no cleanup command. The structured chat view is bounded, while complete task results are stored separately.
 - Notes, an embedded editor, account pools, scheduled tasks, images, and browser portals are planned for later versions.
 
 P0 delivery/reporting, P1 control-panel onboarding, and P2 Graph v1 are implemented. `docs/`, `.dev/`, and `bin/` remain outside the Git allowlist.

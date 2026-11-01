@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -114,8 +113,9 @@ func clipColumns(text string, width int) string {
 
 func (s *Server) peek(raw json.RawMessage) (any, error) {
 	var args struct {
-		ID    string `json:"id"`
-		Lines int    `json:"lines"`
+		ID        string `json:"id"`
+		Workspace string `json:"workspace,omitempty"`
+		Lines     int    `json:"lines"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return nil, err
@@ -126,9 +126,9 @@ func (s *Server) peek(raw json.RawMessage) (any, error) {
 	args.Lines = max(1, min(args.Lines, 100))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p := s.paneLocked(args.ID)
-	if p == nil {
-		return nil, errors.New("pane 不存在")
+	p, err := s.resolvePaneLocked(args.Workspace, args.ID)
+	if err != nil {
+		return nil, err
 	}
 	lines := []string{}
 	if term := s.terminals[p.ID]; term != nil {

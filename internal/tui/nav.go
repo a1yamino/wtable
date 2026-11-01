@@ -156,8 +156,10 @@ func (u *ui) unreadTotal() int {
 // statusHint is the persistent, context-aware key hint on the right.
 func (u *ui) statusHint() string {
 	switch {
+	case u.workspacePicker != nil:
+		return "↑↓ 选择 · Enter 进入 · 输入筛选 · Esc 取消/退出"
 	case u.prefix:
-		return "Ctrl-a 前缀：j/k 切 agent · p 审批 · s 工具槽 · a 左栏 · Space 命令面板"
+		return "Ctrl-a 前缀：j/k 切 agent · w 工作区 · p 审批 · s 工具槽 · a 左栏 · Space 命令面板"
 	case u.panel != nil:
 		return "←→ 侧栏/内容 · ↑↓ 选择 · Enter 操作 · Tab 换页 · Esc 返回"
 	case u.taskView:
@@ -194,7 +196,11 @@ func (u *ui) leftStatus() string {
 			break
 		}
 	}
-	text := fmt.Sprintf("[rail] agent %d/%d", index, len(panes))
+	text := "[ws] " + u.workspaceLabel()
+	if text == "[ws] " {
+		text = "[ws] 选择工作区"
+	}
+	text += fmt.Sprintf(" · agent %d/%d", index, len(panes))
 	if n := u.approvalCount(); n > 0 {
 		text += fmt.Sprintf(" · ⏳%d", n)
 	}

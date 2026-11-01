@@ -75,7 +75,7 @@ func TestSpawnValidatesForegroundKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.stop(first.ID)
+	defer s.stop(first.ID, "")
 	if _, err := s.spawn(model.SpawnParams{Name: "fg2", Kind: model.PaneForeground, Backend: "pty", Cwd: cwd, Command: []string{"/bin/cat"}}, ""); err == nil || !strings.Contains(err.Error(), "前台") {
 		t.Fatalf("second foreground accepted: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestSpawnValidatesForegroundKinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.stop(worker.ID)
+	defer s.stop(worker.ID, "")
 	if worker.Kind != model.PaneWorker {
 		t.Fatalf("worker kind = %q", worker.Kind)
 	}

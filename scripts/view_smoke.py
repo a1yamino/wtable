@@ -159,6 +159,8 @@ def run(args):
         def pane_text(pid):
             return screen_text(rpc.call("pane.screen", {"id": pid}))
 
+        wait_until(lambda: shown("选择工作区"), "workspace picker")
+        send(b"\r")
         wait_until(lambda: shown("PEER_READY"), "initial TUI")
         visible(ids["A"])
         assert size(ids["B"]) == size(ids["C"]) == (80, 24)

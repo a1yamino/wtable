@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -21,8 +20,9 @@ import (
 // is the only caller; presets provide the defaults.
 func (s *Server) setCaps(raw json.RawMessage) (model.Pane, error) {
 	var a struct {
-		ID   string          `json:"id"`
-		Caps *model.PaneCaps `json:"caps"`
+		ID        string          `json:"id"`
+		Workspace string          `json:"workspace,omitempty"`
+		Caps      *model.PaneCaps `json:"caps"`
 	}
 	if err := decode(raw, &a); err != nil {
 		return model.Pane{}, err
@@ -31,10 +31,10 @@ func (s *Server) setCaps(raw json.RawMessage) (model.Pane, error) {
 		return model.Pane{}, errors.New("缺少 caps")
 	}
 	s.mu.Lock()
-	p := s.paneLocked(a.ID)
-	if p == nil {
+	p, err := s.resolvePaneLocked(a.Workspace, a.ID)
+	if err != nil {
 		s.mu.Unlock()
-		return model.Pane{}, errors.New("pane 不存在")
+		return model.Pane{}, err
 	}
 	caps := *a.Caps
 	if caps.Source == "" {
@@ -42,7 +42,7 @@ func (s *Server) setCaps(raw json.RawMessage) (model.Pane, error) {
 	}
 	p.Caps = &caps
 	copy := clonePane(*p)
-	err := s.saveLocked()
+	err = s.saveLocked()
 	s.mu.Unlock()
 	if err == nil && caps.PushIdle {
 		s.wake(copy.ID)
@@ -50,14 +50,18 @@ func (s *Server) setCaps(raw json.RawMessage) (model.Pane, error) {
 	return copy, err
 }
 
-// hasForeground reports whether a pane is already marked as the human-facing
+// hasForeground reports whether the workspace already has the human-facing
 // foreground. except lets a restart validate against everything but itself.
-func (s *Server) hasForeground(except string) bool {
+func (s *Server) hasForeground(workspace, except string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.hasForegroundLocked(workspace, except)
+}
+
+func (s *Server) hasForegroundLocked(workspace, except string) bool {
 	for i := range s.state.Panes {
 		p := &s.state.Panes[i]
-		if p.ID != except && p.Kind == model.PaneForeground {
+		if p.ID != except && p.Workspace == workspace && p.Kind == model.PaneForeground {
 			return true
 		}
 	}
@@ -88,12 +92,25 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 			args.Kind = p.Kind
 			role.Instructions = p.RoleInstructions
 			snapshotHash = p.RoleHash
+			if args.Workspace == "" {
+				args.Workspace = p.Workspace
+			}
+			if args.Cwd == "" {
+				args.Cwd = p.Cwd
+			}
+			if args.Layer == "" {
+				args.Layer = p.Layer
+			}
 		}
 		s.mu.Unlock()
 	}
 	if err := s.resolveLayer(&args); err != nil {
 		return model.Pane{}, err
 	}
+	if err := s.resolveSpawnLocation(&args); err != nil {
+		return model.Pane{}, err
+	}
+	cwd := args.Cwd
 	profileEnv, err := s.accountEnv(args.Account)
 	if err != nil {
 		return model.Pane{}, err
@@ -121,7 +138,7 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		switch {
 		case args.Backend == "acp":
 			args.Kind = model.PaneWorker
-		case !s.hasForeground(restartID):
+		case !s.hasForeground(args.Workspace, restartID):
 			args.Kind = model.PaneForeground
 		default:
 			args.Kind = model.PaneWorker
@@ -130,19 +147,8 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 	if args.Kind == model.PaneForeground && args.Backend != "pty" {
 		return model.Pane{}, errors.New("前台 agent 必须是 PTY；ACP 只能创建为 worker")
 	}
-	if args.Kind == model.PaneForeground && restartID == "" {
-		s.mu.Lock()
-		exists := false
-		for i := range s.state.Panes {
-			if s.state.Panes[i].Kind == model.PaneForeground {
-				exists = true
-				break
-			}
-		}
-		s.mu.Unlock()
-		if exists {
-			return model.Pane{}, errors.New("已有前台 agent；请先移除它，或把新 pane 创建为 worker")
-		}
+	if args.Kind == model.PaneForeground && restartID == "" && s.hasForeground(args.Workspace, "") {
+		return model.Pane{}, errors.New("此工作区已有前台 agent；请先移除它，或把新 pane 创建为 worker")
 	}
 	if len(args.Command) == 0 {
 		if args.Backend == "acp" {
@@ -161,20 +167,6 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 	}
 	if args.DeliveryConfig.SettleMS < 0 || args.DeliveryConfig.VerifyMS < 0 || args.DeliveryConfig.AckTimeoutMS < 0 || args.DeliveryConfig.TailLines < 0 {
 		return model.Pane{}, errors.New("delivery_config values must not be negative")
-	}
-	if args.Cwd == "" {
-		return model.Pane{}, errors.New("需要工作目录")
-	}
-	cwd, err := filepath.Abs(args.Cwd)
-	if err != nil {
-		return model.Pane{}, err
-	}
-	info, err := os.Stat(cwd)
-	if err != nil {
-		return model.Pane{}, err
-	}
-	if !info.IsDir() {
-		return model.Pane{}, errors.New("cwd 不是目录")
 	}
 	if args.Cols == 0 {
 		args.Cols = 80
@@ -197,25 +189,35 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 	}
 	runCtx, runCancel := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	if p := s.paneLocked(args.Name); p != nil && p.ID != restartID {
+	if p := s.paneByNameLocked(args.Workspace, args.Name); p != nil && p.ID != restartID {
 		s.mu.Unlock()
 		runCancel()
-		return model.Pane{}, errors.New("pane 名称已存在")
+		return model.Pane{}, errors.New("工作区内 pane 名称已存在")
 	}
 	var sessionID string
 	targets := []string{}
 	for _, ref := range args.ConnectTo {
-		target := s.paneLocked(ref)
-		if target == nil || target.ID == id {
+		target, err := s.resolvePaneLocked(args.Workspace, ref)
+		if err != nil {
 			s.mu.Unlock()
 			runCancel()
-			return model.Pane{}, errors.New("connect_to 目标不存在或指向自身")
+			return model.Pane{}, err
+		}
+		if target.ID == id {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("connect_to 指向自身")
+		}
+		if target.Workspace != args.Workspace {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("connect_to 不能跨工作区")
 		}
 		if !contains(targets, target.ID) {
 			targets = append(targets, target.ID)
 		}
 	}
-	candidate := model.Pane{ID: id, Name: args.Name, Kind: args.Kind, Backend: args.Backend, Command: args.Command, Cwd: cwd, Preset: args.Preset, Role: args.Role, RoleTemplate: args.RoleTemplate, RoleInstructions: role.Instructions, RoleHash: snapshotHash, Account: args.Account, Endpoint: endpoint, Layer: args.Layer, InjectBrief: args.InjectBrief, LogPath: s.paths.Log, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig}
+	candidate := model.Pane{ID: id, Name: args.Name, Kind: args.Kind, Backend: args.Backend, Command: args.Command, Cwd: cwd, Workspace: args.Workspace, Preset: args.Preset, Role: args.Role, RoleTemplate: args.RoleTemplate, RoleInstructions: role.Instructions, RoleHash: snapshotHash, Account: args.Account, Endpoint: endpoint, Layer: args.Layer, InjectBrief: args.InjectBrief, LogPath: s.paths.Log, State: "starting", TurnState: "idle", CreatedAt: time.Now(), DeliveryConfig: args.DeliveryConfig}
 	brief, briefErr := s.briefTextLocked(candidate, targets)
 	if briefErr != nil {
 		s.mu.Unlock()
@@ -257,20 +259,23 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		delete(s.agents, id)
 		delete(s.terminals, id)
 	} else {
-		if len(s.state.Panes) >= 32 {
+		total, _ := s.workspacePaneCountLocked(args.Workspace)
+		if total >= 32 {
 			s.mu.Unlock()
 			runCancel()
-			return model.Pane{}, errors.New("MVP 最多保留 32 个 pane")
+			return model.Pane{}, errors.New("每个工作区最多保留 32 个 pane")
 		}
-		if candidate.Kind == model.PaneForeground {
-			for i := range s.state.Panes {
-				if s.state.Panes[i].Kind == model.PaneForeground {
-					s.mu.Unlock()
-					runCancel()
-					return model.Pane{}, errors.New("已有前台 agent；请先移除它，或把新 pane 创建为 worker")
-				}
-			}
+		if len(s.state.Panes) >= 128 {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("pane 总数已达上限 128")
 		}
+		if candidate.Kind == model.PaneForeground && s.hasForegroundLocked(args.Workspace, "") {
+			s.mu.Unlock()
+			runCancel()
+			return model.Pane{}, errors.New("此工作区已有前台 agent；请先移除它，或把新 pane 创建为 worker")
+		}
+		s.ensureWorkspaceLocked(args.Workspace, time.Now())
 		if err = s.writeBrief(&candidate, brief); err != nil {
 			s.mu.Unlock()
 			runCancel()
@@ -385,13 +390,22 @@ func (s *Server) childEnv(id, token string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	env := make([]string, 0, len(os.Environ())+6)
+	env := make([]string, 0, len(os.Environ())+7)
 	for _, v := range os.Environ() {
 		if !strings.HasPrefix(v, "WTABLE_") {
 			env = append(env, v)
 		}
 	}
+	s.mu.Lock()
+	workspace := ""
+	if p := s.paneByIDLocked(id); p != nil {
+		workspace = p.Workspace
+	}
+	s.mu.Unlock()
 	env = append(env, "WTABLE_CLI="+exe, "WTABLE_HOME="+s.paths.Home, "WTABLE_PANE_ID="+id, "WTABLE_PEER_TOKEN="+token)
+	if workspace != "" {
+		env = append(env, "WTABLE_WORKSPACE="+workspace)
+	}
 	return env, nil
 }
 
@@ -457,12 +471,12 @@ func (s *Server) paneExited(id, runID string, code int, err error) {
 	s.saveLocked()
 }
 
-func (s *Server) stop(ref string) error {
+func (s *Server) stop(ref, workspace string) error {
 	s.mu.Lock()
-	p := s.paneLocked(ref)
-	if p == nil {
+	p, err := s.resolvePaneLocked(workspace, ref)
+	if err != nil {
 		s.mu.Unlock()
-		return errors.New("pane 不存在")
+		return err
 	}
 	id := p.ID
 	t := s.terminals[id]

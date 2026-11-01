@@ -453,6 +453,9 @@ func (u *ui) drawTransientModals() {
 	if u.pendingPaste != "" {
 		u.modal([]string{"多行粘贴确认", "目标程序未启用 bracketed paste，粘贴可能执行多条命令。", "按 y 发送 · n / Esc 取消", fmt.Sprintf("共 %d 字节", len(u.pendingPaste))})
 	}
+	if u.workspacePicker != nil {
+		u.drawWorkspacePicker()
+	}
 	if u.mode != "" {
 		u.drawInput()
 	}
@@ -482,7 +485,8 @@ func (u *ui) helpLines() []string {
 	}
 	return []string{
 		"快捷帮助 · " + first,
-		"Ctrl-a j/k 切换 · 1..9 直达 · h/l 主/槽 · p 审批 · s 工具槽 · a 左栏 · Space 命令 · q 离开",
+		"Ctrl-a j/k 切换 · 1..9 直达 · h/l 主/槽 · w 切换工作区 · p 审批 · s 工具槽 · a 左栏 · Space 命令 · q 离开",
+		"当前工作区 " + u.workspaceLabel(),
 		"图例 ◌ 启动 · ● 空闲 · ◐ 执行 · ⏳ 审批 · ⏸ 排队 · ◉ 未读 · ✕ 退出 · Ctrl-a Ctrl-a 发送字面 ^A",
 	}
 }
@@ -568,6 +572,7 @@ func (u *ui) drawInput() {
 		"task-raw":          "发送原始按键：<Enter> <Esc> <Ctrl-C> <Up> <Down>，按字面发送",
 		"queue-edit":        "编辑排队任务（Enter 保存 · Esc 取消）",
 		"rail-filter":       "过滤左栏列表（留空表示不过滤）",
+		"workspace":         "打开工作区目录（相对路径按当前工作区解析）",
 	}[u.mode]
 	if u.mode == "task" {
 		if p := u.current(); p != nil {

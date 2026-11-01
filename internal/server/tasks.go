@@ -19,35 +19,56 @@ import (
 var maxTaskContentBytes = 64 << 20
 
 func (s *Server) edge(method string, raw json.RawMessage) (any, error) {
-	var a model.Edge
+	var a struct {
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Workspace string `json:"workspace,omitempty"`
+	}
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
+	scope := ""
+	if a.Workspace != "" {
+		clean, err := cleanWorkspacePath(a.Workspace)
+		if err != nil {
+			return nil, err
+		}
+		scope = clean
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	from, to := s.paneLocked(a.From), s.paneLocked(a.To)
-	if from == nil || to == nil {
-		return nil, errors.New("连线的 pane 不存在")
+	from, err := s.resolvePaneLocked(scope, a.From)
+	if err != nil {
+		return nil, err
+	}
+	if scope == "" {
+		scope = from.Workspace
+	}
+	to, err := s.resolvePaneLocked(scope, a.To)
+	if err != nil {
+		return nil, err
 	}
 	if from.ID == to.ID {
 		return nil, errors.New("不能连接到自身")
 	}
-	a.From = from.ID
-	a.To = to.ID
+	if from.Workspace != to.Workspace {
+		return nil, errors.New("不能跨工作区连线")
+	}
+	edge := model.Edge{From: from.ID, To: to.ID}
 	if method == "edge.add" {
-		if !s.hasEdgeLocked(a.From, a.To) {
-			s.state.Edges = append(s.state.Edges, a)
+		if !s.hasEdgeLocked(edge.From, edge.To) {
+			s.state.Edges = append(s.state.Edges, edge)
 		}
 	} else {
 		for i, e := range s.state.Edges {
-			if e == a {
+			if e == edge {
 				s.state.Edges = append(s.state.Edges[:i], s.state.Edges[i+1:]...)
 				break
 			}
 		}
 		for i := range s.state.Tasks {
 			t := &s.state.Tasks[i]
-			if t.From == a.From && t.To == a.To && t.State == "queued" {
+			if t.From == edge.From && t.To == edge.To && t.State == "queued" {
 				t.State = "cancelled"
 				t.Result = "授权连线已移除"
 				t.UpdatedAt = time.Now()
@@ -56,14 +77,34 @@ func (s *Server) edge(method string, raw json.RawMessage) (any, error) {
 			}
 		}
 	}
-	return a, s.saveLocked()
+	return edge, s.saveLocked()
 }
 
-func (s *Server) peers(principal string) []model.Pane {
+func (s *Server) peers(principal string, raw json.RawMessage) []model.Pane {
+	var a struct {
+		Workspace string `json:"workspace,omitempty"`
+	}
+	if len(raw) > 0 {
+		_ = decode(raw, &a)
+	}
+	workspace := ""
+	if a.Workspace != "" {
+		if clean, err := cleanWorkspacePath(a.Workspace); err == nil {
+			workspace = clean
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if principal != "controller" {
+		if p := s.paneByIDLocked(principal); p != nil {
+			workspace = p.Workspace
+		}
+	}
 	panes := []model.Pane{}
 	for _, p := range s.state.Panes {
+		if workspace != "" && p.Workspace != workspace {
+			continue
+		}
 		if principal == "controller" || s.hasEdgeLocked(principal, p.ID) {
 			p.Messages = nil
 			p.Command = nil
@@ -129,9 +170,27 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 	if len(a.DedupeKey) > 256 {
 		return model.Task{}, errors.New("dedupe_key 最长 256 字节")
 	}
-	p := s.paneLocked(a.To)
-	if p == nil {
-		return model.Task{}, errors.New("目标 pane 不存在")
+	scope := ""
+	if principal != "controller" {
+		if pp := s.paneByIDLocked(principal); pp != nil {
+			scope = pp.Workspace
+		}
+	} else if a.Workspace != "" {
+		clean, err := cleanWorkspacePath(a.Workspace)
+		if err != nil {
+			return model.Task{}, err
+		}
+		scope = clean
+	}
+	p, err := s.resolvePaneLocked(scope, a.To)
+	if err != nil {
+		return model.Task{}, errors.New("目标 pane 不存在或不属于该工作区")
+	}
+	if scope == "" {
+		scope = p.Workspace
+	}
+	if p.Workspace != scope {
+		return model.Task{}, errors.New("目标 pane 不属于该工作区")
 	}
 	if principal != "controller" && !s.hasEdgeLocked(principal, p.ID) {
 		return model.Task{}, deniedError("没有发送到此 pane 的授权连线", p.ID)
@@ -182,9 +241,12 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 		return model.Task{}, errors.New("on_complete=none 不能指定 report_to")
 	}
 	if a.OnComplete != "none" {
-		recipient := s.paneLocked(a.ReportTo)
-		if recipient == nil {
-			return model.Task{}, errors.New("report_to pane 不存在")
+		recipient, err := s.resolvePaneLocked(scope, a.ReportTo)
+		if err != nil {
+			return model.Task{}, errors.New("report_to pane 不存在或不属于该工作区")
+		}
+		if recipient.Workspace != p.Workspace {
+			return model.Task{}, errors.New("report_to 不能跨工作区")
 		}
 		a.ReportTo = recipient.ID
 		if principal != "controller" && !s.hasEdgeLocked(principal, recipient.ID) {
@@ -195,6 +257,9 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 		parent := s.taskLocked(a.ParentTask)
 		if parent == nil || (principal != "controller" && parent.From != principal && parent.To != principal) {
 			return model.Task{}, deniedError("无权引用 parent_task")
+		}
+		if parent.Workspace != "" && parent.Workspace != p.Workspace {
+			return model.Task{}, errors.New("parent_task 不能跨工作区")
 		}
 	}
 	if a.IdempotencyKey == "" {
@@ -209,7 +274,7 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 			if key == "" {
 				key = t.DedupeKey
 			}
-			if t.From == principal && key == a.IdempotencyKey {
+			if t.From == principal && t.Workspace == p.Workspace && key == a.IdempotencyKey {
 				if t.To != a.To || t.Prompt != a.Prompt || t.OnComplete != a.OnComplete || t.ReportTo != a.ReportTo || t.ParentTask != a.ParentTask {
 					return model.Task{}, errors.New("task idempotency key was reused with a different prompt")
 				}
@@ -231,7 +296,7 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 	if origin == "controller" {
 		origin = "human"
 	}
-	t := model.Task{ID: newID("t-"), From: principal, Origin: origin, To: a.To, Prompt: a.Prompt, Kind: a.Kind, State: "queued", DeliveryMode: a.DeliveryMode, OnComplete: a.OnComplete, ReportTo: a.ReportTo, ParentTask: a.ParentTask, RetryOf: retryOf, DedupeKey: a.DedupeKey, IdempotencyKey: a.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
+	t := model.Task{ID: newID("t-"), From: principal, Origin: origin, To: a.To, Prompt: a.Prompt, Kind: a.Kind, State: "queued", Workspace: p.Workspace, DeliveryMode: a.DeliveryMode, OnComplete: a.OnComplete, ReportTo: a.ReportTo, ParentTask: a.ParentTask, RetryOf: retryOf, DedupeKey: a.DedupeKey, IdempotencyKey: a.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
 	s.state.Tasks = append(s.state.Tasks, t)
 	return t, s.saveLocked()
 }
@@ -480,17 +545,34 @@ func (s *Server) finishTask(principal string, raw json.RawMessage, manual bool) 
 
 func (s *Server) getTasks(principal, method string, raw json.RawMessage) (any, error) {
 	var a struct {
-		ID string `json:"id"`
+		ID        string `json:"id"`
+		Workspace string `json:"workspace,omitempty"`
 	}
 	if err := decode(raw, &a); err != nil {
 		return nil, err
 	}
+	scope := ""
+	if a.Workspace != "" {
+		clean, err := cleanWorkspacePath(a.Workspace)
+		if err != nil {
+			return nil, err
+		}
+		scope = clean
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if principal != "controller" {
+		if p := s.paneByIDLocked(principal); p != nil {
+			scope = p.Workspace
+		}
+	}
 	if method == "task.get" {
 		t := s.taskLocked(a.ID)
 		if t == nil {
 			return nil, errors.New("任务不存在")
+		}
+		if scope != "" && t.Workspace != "" && t.Workspace != scope {
+			return nil, deniedError("任务不属于该工作区")
 		}
 		if principal != "controller" && t.From != principal && t.To != principal {
 			return nil, deniedError("无权读取任务")
@@ -502,6 +584,9 @@ func (s *Server) getTasks(principal, method string, raw json.RawMessage) (any, e
 		// Briefs are standing instructions, not delegated work. task.get still
 		// returns one by ID; the default list stays readable.
 		if t.Kind == model.TaskKindBrief {
+			continue
+		}
+		if scope != "" && t.Workspace != "" && t.Workspace != scope {
 			continue
 		}
 		if principal == "controller" || t.From == principal || t.To == principal {
