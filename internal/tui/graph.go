@@ -419,7 +419,7 @@ func (u *ui) drawGraph() {
 		mode = "真实边"
 	}
 	u.line(0, 0, w, "协作 Graph · "+mode+" · j/k 选择 · Enter 打开 · e 节点/边 · x 删边 · Esc 返回", barStyle)
-	detail := "虚线 you → pane 为人类入口，不可选删 · 方向键移动视口 · PgUp/PgDn 任务"
+	detail := "虚线 you → pane 表示人类入口（固定保留）· 方向键移动视口 · PgUp/PgDn 切任务"
 	if v.edges {
 		detail = "没有真实授权边"
 		if len(edges) > 0 {
@@ -451,7 +451,7 @@ func (u *ui) drawGraph() {
 	}
 	u.line(0, h-1, w, u.status, barStyle)
 	if v.confirm != nil {
-		u.modal([]string{"删除授权边：" + u.paneName(v.confirm.From) + " → " + u.paneName(v.confirm.To) + "？", "该方向排队任务会取消，已执行操作不会撤销。", "按 y 确认；n / Esc 取消；Enter 不确认", u.status})
+		u.modal([]string{"删除授权边：" + u.paneName(v.confirm.From) + " → " + u.paneName(v.confirm.To) + "？", "该方向的排队任务会一并取消，已执行的操作保持原样。", "按 y 确认 · n / Esc 取消", u.status})
 	}
 }
 

@@ -66,7 +66,7 @@ func (u *ui) submitTaskAction(mode, input string) bool {
 		}
 	case "task-confirm-stop":
 		if input != "y" {
-			u.status = "确认已停止后输入 y；Esc 返回"
+			u.status = "输入 y 确认任务已停止 · Esc 返回"
 			return false
 		}
 		if !u.call("task.cancel", map[string]any{"id": id, "confirmed": true}, &t) {
@@ -80,7 +80,7 @@ func (u *ui) submitTaskAction(mode, input string) bool {
 		if !u.call("pane.input", map[string]string{"id": t.To, "data": data}, nil) {
 			return false
 		}
-		u.status = "已发送原始输入；任务状态未自动更改"
+		u.status = "已发送原始输入；任务状态需要你手动标记"
 		return true
 	}
 	u.taskDetail = &t
@@ -92,7 +92,7 @@ func (u *ui) submitTaskAction(mode, input string) bool {
 
 func (u *ui) drawTaskScreen() {
 	w, h := u.screen.Size()
-	lines := []string{"目标终端的一次性快照 · Esc 返回（不据此判定完成）"}
+	lines := []string{"目标终端的即时快照 · 仅供查看 · Esc 返回 · 任务状态请手动标记"}
 	for _, row := range u.taskScreen.Cells {
 		var b strings.Builder
 		for _, c := range row {

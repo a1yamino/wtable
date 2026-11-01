@@ -171,7 +171,7 @@ func (u *ui) drawTasks() {
 	w, h := u.screen.Size()
 	width := max(1, min(90, max(1, w-4))-2)
 	capacity := max(1, h-6)
-	lines := []string{"任务 · ↑↓ 选择 · Enter 操作 · Tab 报告 · Esc 返回"}
+	lines := []string{"任务列表 · ↑↓ 选择 · Enter 操作 · Tab 报告 · Esc 返回"}
 	u.taskRows = map[int]string{}
 	if t := u.taskDetail; t != nil {
 		body := []string{fmt.Sprintf("%s  %s → %s  [%s]", t.ID, u.paneName(t.From), u.paneName(t.To), t.State), "创建：" + t.CreatedAt.Format("01-02 15:04:05") + "  更新：" + t.UpdatedAt.Format("01-02 15:04:05"), "", "投递：" + t.DeliveryMode + " / " + t.DeliveryStatus, "投递说明：" + t.DeliveryError,
@@ -185,12 +185,12 @@ func (u *ui) drawTasks() {
 			}
 		}
 		u.taskScroll = min(u.taskScroll, max(0, len(wrapped)-capacity))
-		lines = []string{fmt.Sprintf("任务详情 · ↑↓/PgUp/PgDn 滚动 · c 取消 · r 重发 · Esc 列表 (%d/%d)", u.taskScroll+1, max(1, len(wrapped)))}
+		lines = []string{fmt.Sprintf("任务详情 · ↑↓/PgUp/PgDn 滚动 · c 取消 · r 重发 · Esc 返回列表（%d/%d）", u.taskScroll+1, max(1, len(wrapped)))}
 		lines = append(lines, wrapped[u.taskScroll:min(len(wrapped), u.taskScroll+capacity)]...)
 	} else {
 		tasks := u.orderedTasks()
 		if len(tasks) == 0 {
-			lines = append(lines, "暂无任务：关闭列表，聚焦目标 pane，按 Ctrl-a t 发送")
+			lines = append(lines, "还没有任务：关闭列表，聚焦目标 pane，按 Ctrl-a t 发送")
 		}
 		selected := u.pickedTask(tasks)
 		start := max(0, selected-capacity+1)

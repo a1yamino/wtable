@@ -246,7 +246,7 @@ func (u *ui) draw() {
 		}
 	}
 	if len(u.boxes) == 0 {
-		u.line(u.canvas.railW+2, 1, max(0, w-u.canvas.railW-4), "还没有可见的 agent · Ctrl-a Space 新建 · Ctrl-a a 左栏", barStyle)
+		u.line(u.canvas.railW+2, 1, max(0, w-u.canvas.railW-4), "还没有可见的 agent · Ctrl-a Space 打开命令面板 · Ctrl-a a 打开左栏", barStyle)
 	}
 	u.drawSelection()
 	u.drawStatusBar()
@@ -339,7 +339,7 @@ func (u *ui) drawPane(p model.Pane, r rect) {
 		}
 	}
 	if restartable(p.State) && content.h > 0 {
-		u.line(content.x, content.y, content.w, "[Enter / 点击此项重启] 重新执行原命令", focusStyle)
+		u.line(content.x, content.y, content.w, "[按 Enter 或点击此处重启] 将按原命令重新启动", focusStyle)
 	}
 	if p.ID == u.canvas.main {
 		u.drawApprovalCard(u.approvalRect)
@@ -403,7 +403,7 @@ func (u *ui) queueBarText(p model.Pane) string {
 	} else if t := u.lastSentChat(p.ID); t != nil {
 		parts = append(parts, "· "+chatStateLabel(t.State), firstLineText(t.Prompt))
 	}
-	parts = append(parts, "点击或 Ctrl-a Space → 队列")
+	parts = append(parts, "点击这里，或按 Ctrl-a Space 打开队列")
 	return strings.Join(parts, " · ")
 }
 
@@ -451,7 +451,7 @@ func (u *ui) drawTransientModals() {
 		u.modal(u.helpLines())
 	}
 	if u.pendingPaste != "" {
-		u.modal([]string{"多行粘贴确认", "目标程序未启用 bracketed paste，粘贴可能执行多条命令。", "按 y 发送；n / Esc 取消（Enter 不会发送）", fmt.Sprintf("共 %d 字节", len(u.pendingPaste))})
+		u.modal([]string{"多行粘贴确认", "目标程序未启用 bracketed paste，粘贴可能执行多条命令。", "按 y 发送 · n / Esc 取消", fmt.Sprintf("共 %d 字节", len(u.pendingPaste))})
 	}
 	if u.mode != "" {
 		u.drawInput()
@@ -471,12 +471,12 @@ func (u *ui) drawTransientModals() {
 }
 
 func (u *ui) helpLines() []string {
-	first := "主画布 · 直接输入"
+	first := "主画布 · 直接输入即可"
 	switch u.area {
 	case focusRail:
 		first = "左栏 · ↑↓ 选择 · Enter 打开 · Space 动作 · n 新建 · p 工具槽 · x 移除 · / 过滤 · Esc 返回"
 	case focusApproval:
-		first = "审批卡 · 1..9 选择 · r 拒绝 · d 稍后 · [ ] 切换 · Enter 详情 · Esc 收起"
+		first = "审批卡 · 1..9 选择 · r 拒绝 · d 稍后处理 · [ ] 切换 · Enter 详情 · Esc 收起"
 	case focusUtility:
 		first = "工具槽 · Ctrl-a h 回到主画布 · Ctrl-a s 关闭（进程继续运行）"
 	}
@@ -560,14 +560,14 @@ func (u *ui) drawInput() {
 	w, h := u.screen.Size()
 	width := max(1, min(90, max(1, w-4))-2)
 	title := map[string]string{
-		"command": "新终端命令（通过 /bin/zsh -lc 执行）", "task": "发送任务",
+		"command": "新终端命令（通过 /bin/zsh -lc 执行）", "task": "派发任务",
 		"edge": "添加授权边：来源名称 目标名称", "unedge": "删除授权边：来源名称 目标名称",
 		"stop": "停止当前 pane：输入 y 后 Enter 确认", "task-done": "人工标记完成：输入实际结果",
-		"task-fail": "人工标记失败：输入原因", "task-redirect": "重发到其他 pane：输入名称（保留原任务）",
-		"task-confirm-stop": "确认任务已停止：输入 y（不会自动判断）",
-		"task-raw":          "原始输入：<Enter> <Esc> <Ctrl-C> <Up> <Down>，不自动回车",
+		"task-fail": "人工标记失败：输入原因", "task-redirect": "改派到其他 pane：输入名称（原任务保留）",
+		"task-confirm-stop": "任务已停止？输入 y 确认",
+		"task-raw":          "发送原始按键：<Enter> <Esc> <Ctrl-C> <Up> <Down>，按字面发送",
 		"queue-edit":        "编辑排队任务（Enter 保存 · Esc 取消）",
-		"rail-filter":       "过滤左栏（空值清除）",
+		"rail-filter":       "过滤左栏列表（留空表示不过滤）",
 	}[u.mode]
 	if u.mode == "task" {
 		if p := u.current(); p != nil {

@@ -64,7 +64,7 @@ func (u *ui) drawReports() {
 	w, h := u.screen.Size()
 	capacity := max(1, h-6)
 	width := max(1, min(90, w-4)-2)
-	lines := []string{"报告收件箱 · 通知不执行 · ↑↓ 选择 · Enter 详情 · Tab 任务 · Esc 返回"}
+	lines := []string{"报告收件箱 · 在这里查看通知 · ↑↓ 选择 · Enter 详情 · Tab 切换任务 · Esc 返回"}
 	if r := u.reportDetail; r != nil {
 		body := []string{fmt.Sprintf("%s → %s [%s / %s]", u.paneName(r.From), u.paneName(r.To), r.Mode, r.State), "原任务：" + r.ParentTask, "后续任务：" + r.HandoffTask, r.Error, "", r.Summary}
 		var wrapped []string

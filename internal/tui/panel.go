@@ -288,7 +288,7 @@ func (u *ui) startAgentForm(edit bool) {
 		if !found {
 			accounts = append(accounts, panelOption{pane.Account, pane.Account + " · 原账号档案已缺失"})
 		}
-		p.fields = []panelField{textField("name", "名字", pane.Name), textField("role", "角色", pane.Role), optionField("account", "账号档案（运行中不可切换）", pane.Account, accounts), optionField("role_template", "角色模板（重新快照）", pane.RoleTemplate, u.roleOptions())}
+		p.fields = []panelField{textField("name", "名字", pane.Name), textField("role", "角色", pane.Role), optionField("account", "账号档案（需先停止才能切换）", pane.Account, accounts), optionField("role_template", "角色模板（重新快照）", pane.RoleTemplate, u.roleOptions())}
 		return
 	}
 	presets := []panelOption{}
@@ -310,7 +310,7 @@ func (u *ui) startAgentForm(edit bool) {
 		textField("name", "名字", ""),
 		optionField("preset", "预设", "shell", presets),
 		optionField("backend", "后端（自定义命令）", "pty", []panelOption{{"pty", "PTY 终端"}, {"acp", "ACP 会话"}}),
-		textField("command", "自定义命令（支持引号，不展开变量）", ""),
+		textField("command", "自定义命令（支持引号；变量按字面传入）", ""),
 		textField("cwd", "目录", cwd),
 		optionField("layer", "Layer", u.activeLayer, u.layerOptions()),
 		textField("role", "角色", ""),
@@ -351,13 +351,13 @@ func (u *ui) startSendForm() {
 		targets.checked[pane.ID] = true
 	}
 	reportOpts := append([]panelOption{{"", "未选择"}}, opts...)
-	p.fields = []panelField{targets, textField("prompt", "任务内容", ""), optionField("delivery", "PTY 投递方式", "", []panelOption{{"", "默认"}, {"inject", "inject"}, {"claim", "claim"}}), optionField("queue", "等待就绪 / 忙时排队", "false", []panelOption{{"false", "否"}, {"true", "是"}}), optionField("complete", "完成后", "none", []panelOption{{"none", "不汇报"}, {"notify", "通知（不执行）"}, {"handoff", "派发后续任务"}}), optionField("report", "汇报给", "", reportOpts)}
+	p.fields = []panelField{targets, textField("prompt", "任务内容", ""), optionField("delivery", "PTY 投递方式", "", []panelOption{{"", "默认"}, {"inject", "inject"}, {"claim", "claim"}}), optionField("queue", "等待就绪 / 忙时排队", "false", []panelOption{{"false", "否"}, {"true", "是"}}), optionField("complete", "完成后", "none", []panelOption{{"none", "不汇报"}, {"notify", "仅发通知"}, {"handoff", "派发后续任务"}}), optionField("report", "汇报给", "", reportOpts)}
 }
 func (u *ui) startLayerForm() {
 	p := u.panel
 	p.form = "layer"
 	p.field = 0
-	p.fields = []panelField{textField("name", "Layer 名称", ""), textField("cwd", "仓库目录", u.cwd), textField("base", "基准（空值为 origin/main 或 HEAD）", "")}
+	p.fields = []panelField{textField("name", "Layer 名称", ""), textField("cwd", "仓库目录", u.cwd), textField("base", "基准（留空用 origin/main 或 HEAD）", "")}
 }
 func (u *ui) panelEdges() []model.Edge {
 	out := []model.Edge{}
@@ -821,7 +821,7 @@ func (u *ui) submitPanelForm() {
 			}
 			var task model.Task
 			if !u.call("task.send", args, &task) {
-				u.status = fmt.Sprintf("已发送 %d 个；未完成目标保留：%s", count, u.status)
+				u.status = fmt.Sprintf("已发送 %d 个；未完成的目标已保留在表单：%s", count, u.status)
 				return
 			}
 			delete(targets.checked, to)

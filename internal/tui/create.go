@@ -21,7 +21,7 @@ type createView struct {
 func (u *ui) openCreate(kind string) {
 	if kind == model.PaneForeground {
 		if p := u.foregroundPane(); p != nil {
-			u.status = "已有前台 " + p.Name + "；先移除它，或改为新建 worker"
+			u.status = "已有前台 " + p.Name + "；请先移除它，或改为新建 worker"
 			return
 		}
 	}
@@ -158,7 +158,7 @@ func (u *ui) spawnPreset(preset model.Preset, kind string) {
 		u.selectMain(pane.ID)
 		u.status = "已创建前台 " + pane.Name + "；主画布已就绪"
 	} else {
-		u.status = "已创建 worker " + pane.Name + "；左栏可见，前台不变"
+		u.status = "已创建 worker " + pane.Name + "，可在左栏找到它"
 	}
 	u.resize()
 }
@@ -231,9 +231,9 @@ func (u *ui) drawCreate() {
 	}
 	lines := []string{title}
 	if c.mode == model.PaneForeground {
-		lines = append(lines, "只列出 PTY 预设；ACP 只在 worker 流程出现")
+		lines = append(lines, "前台使用 PTY 预设；想用 ACP 请新建 worker")
 	} else {
-		lines = append(lines, "worker 可以是 PTY 或 ACP；不会改变前台")
+		lines = append(lines, "worker 支持 PTY 和 ACP，会出现在左栏")
 	}
 	lines = append(lines, "")
 	index := 0

@@ -114,7 +114,7 @@ func (u *ui) composerKey(e *tcell.EventKey, p *model.Pane) {
 			return
 		}
 		if p.TurnState == "waiting-permission" {
-			u.status = "等待审批：Ctrl-a p 处理，Enter 不会发送"
+			u.status = "等待审批：请先按 Ctrl-a p 处理"
 			return
 		}
 		u.sendChat(p)

@@ -44,14 +44,14 @@ func (u *ui) drawPanel() {
 		if p.confirmKind == "pane" {
 			question = []string{"移除 " + u.paneName(p.confirmID) + "？进程将停止，相关排队任务会取消。", "任务、报告和身份说明历史保留。"}
 		} else if p.confirmKind == "role" {
-			question = []string{"删除角色模板 " + p.confirmID + "？已运行实例的角色快照保持不变。"}
+			question = []string{"删除角色模板 " + p.confirmID + "？已运行的实例继续沿用创建时的角色快照。"}
 		} else {
 			var e model.Edge
 			_ = json.Unmarshal([]byte(p.confirmID), &e)
-			question = []string{"删除 " + u.paneName(e.From) + " → " + u.paneName(e.To) + "？", "该方向排队任务会取消，已执行操作不会撤销。"}
+			question = []string{"删除 " + u.paneName(e.From) + " → " + u.paneName(e.To) + "？", "该方向的排队任务会一并取消，已执行的操作保持原样。"}
 		}
 		lines := append([]string{}, question...)
-		lines = append(lines, "", "  [ 确认 ]        [ 取消 ]", "", "y 确认 · n/Esc 取消 · Enter 不确认（安全考虑）；也可以直接点上面的按钮")
+		lines = append(lines, "", "  [ 确认 ]        [ 取消 ]", "", "按 y 确认 · n / Esc 取消；也可以直接点击上方按钮")
 		top := u.panelFrame("确认", lines)
 		// lines: question..., blank, "[ 确认 ] [ 取消 ]", blank, hint.
 		buttons := top + len(question) + 1
@@ -142,7 +142,7 @@ func (u *ui) drawPanel() {
 					if p.form == "edge" && f.key == "targets" {
 						from := p.get("from").value()
 						if from == f.value() {
-							value += " · 自身不可选"
+							value += " · 不能选自己"
 						}
 						for _, e := range u.snapshot.Edges {
 							if e.From == from && e.To == f.value() {
@@ -191,7 +191,7 @@ func (u *ui) drawPanel() {
 	var lines []string
 	actions := []string{
 		"a 添加 Agent · e 编辑 · d 移除 · Enter 打开 · p 工具槽 · v peek · b 重发说明",
-		"a 添加边 · x 删除边 · t 只看当前 pane 相关（you→pane 是人类能力，不可删）",
+		"a 添加边 · x 删除边 · t 只看当前 pane 相关（you→pane 表示人类入口，固定保留）",
 		"s 派活 · Enter 详情 · r 重发 · x 取消 · b 报告收件箱",
 		"n 新建 Layer · Enter 设为新 pane 的默认目录",
 		"a 新建角色 · e 编辑 · x 删除",

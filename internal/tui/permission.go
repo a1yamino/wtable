@@ -80,7 +80,7 @@ func (u *ui) focusPermission(id string) {
 // the next one when the card is already focused. It never auto-approves.
 func (u *ui) processNextApproval() {
 	if len(u.snapshot.Permissions) == 0 {
-		u.status = "没有待审批的请求"
+		u.status = "当前没有等待审批的请求"
 		return
 	}
 	global := u.snapshot.Permissions
@@ -199,7 +199,7 @@ func (u *ui) approvalKey(e *tcell.EventKey) {
 			optionID, ok := allowAllOption(perms)
 			if !ok {
 				u.approval.allowAll = false
-				u.status = "请求不相同，全部允许已取消；请逐个处理"
+				u.status = "这些请求内容不完全相同，无法一次性全部允许；请逐个处理"
 				return
 			}
 			count := 0
@@ -250,7 +250,7 @@ func (u *ui) approvalKey(e *tcell.EventKey) {
 	switch e.Key() {
 	case tcell.KeyEscape:
 		u.area = focusMain
-		u.status = "已收起审批卡；请求仍在等待"
+		u.status = "已收起审批卡；请求仍在等待，Ctrl-a p 可重新打开"
 		return
 	case tcell.KeyEnter:
 		u.approval.expanded = !u.approval.expanded
@@ -285,7 +285,7 @@ func (u *ui) approvalKey(e *tcell.EventKey) {
 			}
 			u.approval.snoozed[u.canvas.main] = true
 			u.area = focusMain
-			u.status = "已稍后；请求仍在等待，Ctrl-a p 可再打开"
+			u.status = "已暂缓；请求仍在等待，Ctrl-a p 可重新打开"
 			u.resize()
 		case "[":
 			u.shiftPermission(-1)
@@ -293,14 +293,14 @@ func (u *ui) approvalKey(e *tcell.EventKey) {
 			u.shiftPermission(1)
 		case "R":
 			u.approval.rejectAll = true
-			u.status = fmt.Sprintf("拒绝当前 pane 的全部 %d 个请求？输入 y 确认；其他键取消", len(u.permitsFor(u.canvas.main)))
+			u.status = fmt.Sprintf("要拒绝当前 pane 的全部 %d 个请求吗？按 y 确认，其他键取消", len(u.permitsFor(u.canvas.main)))
 		case "A":
 			if _, ok := allowAllOption(u.permitsFor(u.canvas.main)); !ok {
 				u.status = "全部允许仅限同一 pane、同一工具、同一 allow_always 选项；这些请求请逐个处理"
 				return
 			}
 			u.approval.allowAll = true
-			u.status = fmt.Sprintf("允许当前 pane 的全部 %d 个请求？输入 y 确认；其他键取消", len(u.permitsFor(u.canvas.main)))
+			u.status = fmt.Sprintf("要允许当前 pane 的全部 %d 个请求吗？按 y 确认，其他键取消", len(u.permitsFor(u.canvas.main)))
 		}
 	}
 }
@@ -338,7 +338,7 @@ func approvalSummary(perm *model.Permission) string {
 	}
 	parts = append(parts, input)
 	if len(perm.Locations) > 0 {
-		parts = append(parts, fmt.Sprintf("路径 %d 个", len(perm.Locations)))
+		parts = append(parts, fmt.Sprintf("涉及 %d 个路径", len(perm.Locations)))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -388,13 +388,13 @@ func (u *ui) drawApprovalCard(r rect) {
 	if r.h > 2 {
 		u.line(r.x, r.y+2, r.w, "  "+strings.Join(options, "  "), base)
 	}
-	hint := "1..9 选择 · r 拒绝 · d 稍后 · [ ] 切换 · Enter 详情 · Esc 收起"
+	hint := "1..9 选择 · r 拒绝 · d 稍后处理 · [ ] 切换请求 · Enter 详情 · Esc 收起"
 	if u.approval.rejectAll {
-		hint = "拒绝本页全部请求？y 确认 · 其他键取消"
+		hint = "要拒绝全部请求吗？按 y 确认，其他键取消"
 	} else if u.approval.allowAll {
-		hint = "允许本页全部请求？y 确认 · 其他键取消"
+		hint = "要允许全部请求吗？按 y 确认，其他键取消"
 	} else if !focused {
-		hint = "Ctrl-a p 处理审批；现在输入仍然进入当前 pane"
+		hint = "按 Ctrl-a p 处理审批；现在输入仍然进入当前 pane"
 	}
 	if r.h > 3 {
 		u.line(r.x, r.y+3, r.w, "  "+hint, base)

@@ -61,7 +61,7 @@ func (u *ui) drawRoles() {
 	p := u.panel
 	_, h := u.screen.Size()
 	capacity := max(1, h-7)
-	lines := []string{"角色模板库 · a 添加 · e / Enter 编辑 · d 删除 · Esc 返回", "启动时快照指令；后续修改模板不会改变运行实例"}
+	lines := []string{"角色模板库 · a 添加 · e / Enter 编辑 · d 删除 · Esc 返回", "创建 agent 时会保存当时的角色指令；之后的修改只对新建的 agent 生效"}
 	p.selected = min(p.selected, max(0, len(p.catalog.Roles)-1))
 	start := max(0, p.selected-capacity+1)
 	for i := start; i < min(len(p.catalog.Roles), start+capacity); i++ {

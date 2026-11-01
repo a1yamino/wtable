@@ -142,7 +142,7 @@ func (u *ui) railKey(e *tcell.EventKey) {
 			u.removePaneID(id)
 		} else {
 			u.rail.pendingDel = ""
-			u.status = "已取消移除"
+			u.status = "已取消，未移除"
 		}
 		return
 	}
@@ -188,7 +188,7 @@ func (u *ui) railKey(e *tcell.EventKey) {
 				}
 				u.rail.dismissed[row.id] = true
 				u.ensureRailSelection()
-				u.status = "已稍后；下次打开时仍在收件箱"
+				u.status = "已暂缓；下次打开时仍在收件箱"
 				return
 			}
 		case "n":
@@ -211,7 +211,7 @@ func (u *ui) railKey(e *tcell.EventKey) {
 		case "x":
 			if row.kind == "pane" {
 				u.rail.pendingDel = row.pane.ID
-				u.status = "移除 " + row.pane.Name + "？输入 y 确认；其他键取消"
+				u.status = "要移除 " + row.pane.Name + " 吗？按 y 确认，其他键取消"
 			}
 			return
 		case "/":
@@ -296,7 +296,7 @@ func (u *ui) openRailActions(row railRow) {
 	item := row.item
 	items := []actionItem{
 		{label: "打开", hint: item.Title, run: func() { u.activateRailRow(row) }},
-		{label: "稍后", hint: "本次会话先隐藏", run: func() {
+		{label: "稍后处理", hint: "本次会话内先隐藏", run: func() {
 			if u.rail.dismissed == nil {
 				u.rail.dismissed = map[string]bool{}
 			}
@@ -414,7 +414,7 @@ func (u *ui) drawRail(r rect) {
 		y++
 	}
 	if len(rows) == 0 {
-		u.line(r.x, y, r.w, " 没有 agent", dim)
+		u.line(r.x, y, r.w, " 还没有 agent", dim)
 	}
 	if u.rail.filter != "" {
 		u.line(r.x, r.y+r.h-1, r.w, " /"+truncateColumns(u.rail.filter, max(1, r.w-4)), dim)

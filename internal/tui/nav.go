@@ -113,13 +113,13 @@ func (u *ui) legendOnce(glyph string) {
 	u.seenGlyphs[glyph] = true
 	switch glyph {
 	case glyphApproval:
-		u.status = "⏳ 等待审批：Ctrl-a p 处理；审批不会抢走键盘，Esc 只收起不会拒绝"
+		u.status = "⏳ 等待审批：按 Ctrl-a p 处理；平时仍可直接输入，Esc 收起卡片"
 	case glyphUnread:
-		u.status = "◉ 有未读：打开该 agent 后清除"
+		u.status = "◉ 有未读消息：打开该 agent 后自动清除"
 	case glyphExit:
-		u.status = "✕ 已退出：在左栏选择后按 Space 重启或移除"
+		u.status = "✕ 已退出：在左栏选中后按 Space 重启或移除"
 	case glyphQueue:
-		u.status = "⏸ 有排队消息：点队列条或 Ctrl-a Space → 队列"
+		u.status = "⏸ 有排队中的消息：点击队列条，或按 Ctrl-a Space 打开队列"
 	}
 }
 
@@ -157,7 +157,7 @@ func (u *ui) unreadTotal() int {
 func (u *ui) statusHint() string {
 	switch {
 	case u.prefix:
-		return "Ctrl-a：j/k 切 agent · p 审批 · s 工具槽 · a 左栏 · Space 命令"
+		return "Ctrl-a 前缀：j/k 切 agent · p 审批 · s 工具槽 · a 左栏 · Space 命令面板"
 	case u.panel != nil:
 		return "←→ 侧栏/内容 · ↑↓ 选择 · Enter 操作 · Tab 换页 · Esc 返回"
 	case u.taskView:
@@ -169,18 +169,18 @@ func (u *ui) statusHint() string {
 	case u.create != nil:
 		return "↑↓ 选择 · Enter 创建 · Esc 取消"
 	case u.queueView != nil:
-		return "↑↓ 选择 · Enter 提前 · e 编辑 · x 取消 · Esc 返回"
+		return "↑↓ 选择 · Enter 提到最前 · e 编辑 · x 取消 · Esc 返回"
 	case u.area == focusRail:
 		return "↑↓ 选择 · Enter 打开 · Space 动作 · n 新建 · p 工具槽 · x 移除 · Esc 返回"
 	case u.area == focusApproval:
-		return "1..9 选择 · r 拒绝 · d 稍后 · [ ] 切换 · Enter 详情 · Esc 收起"
+		return "1..9 选择 · r 拒绝 · d 稍后处理 · [ ] 切换 · Enter 详情 · Esc 收起"
 	case u.copyMode:
-		return "回看：↑↓ 滚动 PgUp/PgDn 翻页 y 复制 Esc 返回"
+		return "回看模式：↑↓ 滚动 · PgUp/PgDn 翻页 · y 复制 · Esc 返回"
 	}
 	if p := u.current(); p != nil && p.Backend == "acp" && u.area == focusMain {
-		return "Enter 发送/排队 · Ctrl-J 换行 · Ctrl-a p 审批 · Ctrl-a Space 命令"
+		return "Enter 发送或排队 · Ctrl-J 换行 · Ctrl-a p 审批 · Ctrl-a Space 命令面板"
 	}
-	return "直接输入 · Ctrl-a j/k 切换 · Ctrl-a s 工具槽 · Ctrl-a Space 命令"
+	return "直接输入即可 · Ctrl-a j/k 切 agent · Ctrl-a s 工具槽 · Ctrl-a Space 命令面板"
 }
 
 // leftStatus is the fixed left part of the bar: the only global counters that

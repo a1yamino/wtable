@@ -707,7 +707,7 @@ func (u *ui) copyVisible() {
 			fmt.Fprintf(&b, "%s: %s\n", m.Role, m.Text)
 		}
 	}
-	u.copyText(b.String(), "已复制当前可见屏")
+	u.copyText(b.String(), "已复制当前可见内容")
 }
 
 func (u *ui) copyText(text, success string) {

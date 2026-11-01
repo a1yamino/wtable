@@ -16,7 +16,7 @@ type queueView struct {
 func (u *ui) openQueue(paneID string) {
 	tasks := u.queuedForPane(paneID)
 	if len(tasks) == 0 {
-		u.status = "当前没有排队消息"
+		u.status = "当前没有排队中的消息"
 		return
 	}
 	u.queueView = &queueView{paneID: paneID}
@@ -55,7 +55,7 @@ func (u *ui) queueKey(e *tcell.EventKey) {
 	case tcell.KeyEnter:
 		t := tasks[q.selected]
 		if u.call("task.promote", map[string]string{"id": t.ID}, nil) {
-			u.status = "已提前 " + shortTask(t.ID)
+			u.status = "已把 " + shortTask(t.ID) + " 提到最前"
 			q.selected = 0
 			_, _ = u.refresh()
 		}
@@ -93,7 +93,7 @@ func (u *ui) drawQueue() {
 	if pane != nil {
 		name = pane.Name
 	}
-	lines := []string{fmt.Sprintf("队列 · %s · ↑↓ 选择 · Enter 提前 · e 编辑 · x 取消 · Esc 返回", name)}
+	lines := []string{fmt.Sprintf("队列 · %s · ↑↓ 选择 · Enter 提到最前 · e 编辑 · x 取消 · Esc 返回", name)}
 	if len(tasks) == 0 {
 		lines = append(lines, "队列已空")
 	}
@@ -105,6 +105,6 @@ func (u *ui) drawQueue() {
 		}
 		lines = append(lines, fmt.Sprintf("%s%d. %s  [%s]", marker, i+1, truncateColumns(strings.ReplaceAll(t.Prompt, "\n", " "), 54), chatStateLabel(t.State)))
 	}
-	lines = append(lines, "", "发送后会按顺序投递；中断请用 Ctrl-a Enter（两段确认）")
+	lines = append(lines, "", "发送后会按顺序投递；如需中断当前 turn 再发送，用 Ctrl-a Enter（需二次确认）")
 	u.modal(lines)
 }

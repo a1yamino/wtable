@@ -223,7 +223,7 @@ func (u *ui) putUtility(id string) {
 	}
 	if id == u.canvas.main {
 		if u.canvas.utility == "" {
-			u.status = "它已经在主画布；先打开工具槽再交换"
+			u.status = "它已经在主画布上了；先打开工具槽，才能与它交换"
 			return
 		}
 		u.canvas.utility, u.canvas.main = u.canvas.main, u.canvas.utility
@@ -419,7 +419,7 @@ func (u *ui) peekPane(p model.Pane) {
 		Lines []string `json:"lines"`
 	}
 	if u.call("pane.peek", map[string]any{"id": p.ID, "lines": 20}, &result) {
-		u.panel.preview = "最近 20 行 · " + p.Name + "（后台尺寸保持不变）\n" + strings.Join(result.Lines, "\n")
+		u.panel.preview = "最近 20 行输出 · " + p.Name + "（后台尺寸保持原样）\n" + strings.Join(result.Lines, "\n")
 		u.panel.scroll = 0
 	}
 }
@@ -439,10 +439,10 @@ func (u *ui) conflictWarnings(cwd, layer, account string) []string {
 	}
 	lines := []string{}
 	if location > 0 {
-		lines = append(lines, fmt.Sprintf("⚠ 同目录 / Layer 已有 %d 个运行实例；选项字段按 L 另开 Layer", location))
+		lines = append(lines, fmt.Sprintf("⚠ 同一目录 / Layer 已有 %d 个运行中的实例；如需隔离，可在 Layer 字段按 L 新建 Layer", location))
 	}
 	if shared > 0 {
-		lines = append(lines, fmt.Sprintf("⚠ 同账号 %d 个运行实例，共享额度", shared))
+		lines = append(lines, fmt.Sprintf("⚠ 同一账号已有 %d 个运行中的实例，会共享额度", shared))
 	}
 	return lines
 }

@@ -30,11 +30,11 @@ func (u *ui) openPalette() {
 func (u *ui) paletteItems() []paletteItem {
 	hasForeground := u.foregroundPane() != nil
 	items := []paletteItem{
-		{label: "新建前台 agent", hint: "只能选 PTY 预设", run: func() {
+		{label: "新建前台 agent", hint: "使用 PTY 预设", run: func() {
 			u.palette = nil
 			u.openCreate(model.PaneForeground)
 		}},
-		{label: "新建 worker", hint: "PTY 或 ACP；前台不变", run: func() {
+		{label: "新建 worker", hint: "PTY 或 ACP；新建到左栏", run: func() {
 			u.palette = nil
 			u.openCreate(model.PaneWorker)
 		}},
@@ -52,7 +52,7 @@ func (u *ui) paletteItems() []paletteItem {
 			u.palette = nil
 			u.openTasks()
 		}},
-		{label: "队列", hint: "排队消息：提前 / 编辑 / 取消", run: func() {
+		{label: "队列", hint: "排队消息：提到最前 / 编辑 / 取消", run: func() {
 			u.palette = nil
 			if p := u.current(); p != nil {
 				u.openQueue(p.ID)
@@ -88,7 +88,7 @@ func (u *ui) paletteItems() []paletteItem {
 			u.palette = nil
 			u.openInput("stop", "")
 		}},
-		{label: "显示 / 隐藏对话任务", hint: "Tasks 列表默认不含 chat", run: func() {
+		{label: "显示 / 隐藏对话任务", hint: "任务列表默认不含对话", run: func() {
 			u.palette = nil
 			u.allowChat = !u.allowChat
 			if u.allowChat {
@@ -107,7 +107,7 @@ func (u *ui) paletteItems() []paletteItem {
 		}},
 	}
 	if hasForeground {
-		items[0].hint = "已有前台；先移除再新建"
+		items[0].hint = "已有前台 agent；请先移除再新建"
 	}
 	return items
 }

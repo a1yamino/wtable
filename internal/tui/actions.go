@@ -84,7 +84,7 @@ func (u *ui) panelLayer() *model.Layer {
 
 func (u *ui) showActions(title, object string, items []actionItem) {
 	if len(items) == 0 {
-		u.status = "这里没有可用的操作"
+		u.status = "这里暂时没有可用操作"
 		return
 	}
 	u.actions = &actionMenu{title: title, object: object, items: items}
@@ -180,7 +180,7 @@ func (u *ui) openTaskActions(id string) {
 	}
 	cancelLabel, cancelHint := "取消", "先请求停止；PTY 工作需再次确认"
 	if task.State == "cancelling" {
-		cancelLabel, cancelHint = "确认已停止", "输入 y 后确认；不会自动判断"
+		cancelLabel, cancelHint = "确认已停止", "输入 y 确认任务已停止"
 	}
 	items := []actionItem{
 		{label: "查看详情", hint: task.State + " · " + shortTask(task.ID), run: func() {
