@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 import traceback
-import concurrent.futures
+import sqlite3
 
 
 class RPCError(Exception):
@@ -88,7 +88,7 @@ def screen_text(frame):
 def run(args):
     binary = Path(args.binary).resolve()
     script = Path(__file__).resolve()
-    fixture = script.parent / "fixtures" / "acp_agent.py"
+    fixture = script.parent / "fixtures" / "pty_echo.py"
     report = {"status": "running", "binary": str(binary), "provider_calls": 0,
               "assertions": [], "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     output = Path(args.output).resolve()
@@ -99,6 +99,11 @@ def run(args):
     root = Path(tempfile.mkdtemp(prefix="wtable-smoke-", dir="/tmp"))
     home = root / "state"
     home.mkdir()
+    acp_marker = root / "acp-started"
+    acp_command = [sys.executable, "-c", "from pathlib import Path; Path(" + repr(str(acp_marker)) + ").touch()"]
+    (home / "presets.json").write_text(json.dumps([
+        {"id": "disabled-acp", "name": "Disabled ACP", "backend": "acp", "command": acp_command},
+    ]))
     started = time.monotonic()
     own_pids = set()
 
@@ -143,6 +148,14 @@ def run(args):
     def send(to, text, key):
         return rpc.call("task.send", {"to": to, "prompt": text, "dedupe_key": key})
 
+    def acp_rejected(method, params):
+        try:
+            rpc.call(method, params)
+        except RPCError as exc:
+            assert "ACP 已停用" in str(exc), str(exc)
+        else:
+            raise AssertionError(method + " unexpectedly accepted ACP")
+
     try:
         if not binary.is_file():
             raise RuntimeError("binary does not exist: " + str(binary))
@@ -162,7 +175,19 @@ def run(args):
         wait_until(lambda: "PTY_REATTACHED_MARKER" in screen_text(rpc.call("pane.screen", {"id": shell["id"]})), "PTY reattach output")
         record("pty_survives_rpc_disconnect_and_reconnect", pane_id=shell["id"])
 
-        agent = spawn("fixture-agent", "acp", [sys.executable, str(fixture), "--root", str(root)])
+        panes_before = rpc.call("state.get", {"frames": False})["panes"]
+        acp_rejected("pane.spawn", {"name": "direct-acp", "kind": "worker", "backend": "acp",
+                                    "command": acp_command, "cwd": str(root)})
+        acp_rejected("pane.spawn", {"name": "preset-acp", "kind": "worker", "preset": "disabled-acp",
+                                    "cwd": str(root)})
+        presets = rpc.call("preset.list")["presets"]
+        assert all(p["backend"] == "pty" for p in presets)
+        assert not any(p["id"] in ("disabled-acp", "codex-acp") for p in presets)
+        assert rpc.call("state.get", {"frames": False})["panes"] == panes_before
+        assert not acp_marker.exists(), "rejected ACP command was executed"
+        record("acp_spawn_rejected_and_preset_catalog_hidden")
+
+        agent = spawn("fixture-agent", "pty", [sys.executable, str(fixture), "--root", str(root), "--mode", "auto"])
         first = send(agent["id"], "stream", "duplicate-key")
         duplicate = send(agent["id"], "stream", "duplicate-key")
         assert duplicate["id"] == first["id"]
@@ -175,60 +200,9 @@ def run(args):
         tasks = rpc.call("task.list")
         assert sum(value.get("dedupe_key") == "duplicate-key" for value in tasks) == 1
         result = completed(first["id"])
-        assert result["result"] == "fixture stream result"
+        assert result["result"] == "[dev-fixture] handled: stream"
         record("task_deduplication_and_conflict_rejection", task_id=first["id"])
-        record("acp_streamed_result", task_id=first["id"], result=result["result"])
-
-        for choice in ("reject", "allow"):
-            target = root / (choice + "-target.txt")
-            requested = send(agent["id"], "permission:" + str(target), choice + "-permission")
-            permission = wait_until(lambda: next((p for p in (rpc.call("state.get", {"frames": False}).get("permissions") or [])
-                                                   if p["pane_id"] == agent["id"]), None), "permission request")
-            assert not target.exists(), "fixture executed before approval"
-            rpc.call("permission.reply", {"id": permission["id"], "option_id": choice})
-            result = completed(requested["id"])
-            assert result["result"] == "permission " + ("allowed" if choice == "allow" else "rejected")
-            assert target.exists() == (choice == "allow")
-            if target.exists():
-                assert target.read_text() == "explicitly allowed\n"
-            record("permission_" + choice + "_file_effect", task_id=requested["id"], file_created=target.exists())
-
-        cancel_marker = root / "cancel-executions.txt"
-        cancelling = send(agent["id"], "hold:" + str(cancel_marker), "cancel-active")
-        wait_until(lambda: cancel_marker.exists(), "active prompt before cancellation")
-        requested_cancel = rpc.call("task.cancel", {"id": cancelling["id"]})
-        assert requested_cancel["state"] == "cancelling"
-        wait_until(lambda: task(cancelling["id"])["state"] == "cancelled", "confirmed cancellation")
-        after_cancel = send(agent["id"], "stream", "after-confirmed-cancel")
-        assert completed(after_cancel["id"])["result"] == "fixture stream result"
-        record("acp_cancel_waits_for_confirmation")
-
-        disconnected = spawn("disconnect-agent", "acp", [sys.executable, str(fixture), "--root", str(root)])
-        effect = root / "disconnect-effect.txt"
-        uncertain = send(disconnected["id"], "disconnect:" + str(effect), "uncertain-execution")
-        wait_until(lambda: task(uncertain["id"])["state"] == "unknown", "disconnected result is unknown")
-        assert effect.read_text() == "effect before disconnect\n"
-        record("acp_disconnect_with_side_effect_is_unknown")
-
-        def slow_spawn():
-            connection = connect()
-            try:
-                connection.call("pane.spawn", {"name": "slow-start", "backend": "acp", "cwd": str(root),
-                    "command": [sys.executable, str(fixture), "--root", str(root), "--slow-init"]})
-            except RPCError:
-                return True
-            finally:
-                connection.close()
-            return False
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(slow_spawn)
-            slow = wait_until(lambda: next((p for p in rpc.call("state.get", {"frames": False})["panes"]
-                if p["name"] == "slow-start" and p["state"] == "starting"), None), "starting pane visible")
-            rpc.call("pane.stop", {"id": slow["id"]})
-            assert future.result(timeout=5), "stopped initialization still succeeded"
-        assert next(p for p in rpc.call("state.get", {"frames": False})["panes"] if p["id"] == slow["id"])["state"] != "running"
-        record("stop_during_acp_initialization")
+        record("pty_auto_ack_and_result", task_id=first["id"], result=result["result"])
 
         inbox, outbox = root / "peer-inbox.jsonl", root / "peer-outbox.jsonl"
         inbox.touch()
@@ -259,7 +233,7 @@ def run(args):
         response = peer_call("task.send", {"to": agent["id"], "prompt": "stream", "dedupe_key": "peer-after-edge"})
         assert "error" not in response, "connected peer task was rejected"
         delivered = completed(response["result"]["id"])
-        assert delivered["from"] == peer["id"] and delivered["result"] == "fixture stream result"
+        assert delivered["from"] == peer["id"] and delivered["result"] == "[dev-fixture] handled: stream"
         record("pane_credentials_edge_authorization_and_delivery", pane_id=peer["id"], task_id=delivered["id"])
 
         queued = rpc.call("task.send", {"to": peer["id"], "prompt": "bridge task", "dedupe_key": "pty-bridge", "delivery_mode": "claim"})
@@ -298,28 +272,51 @@ def run(args):
         assert "-source baseline" in diff and "+isolated layer change" in diff
         record("git_worktree_isolation_and_diff", branch=layer["branch"])
 
-        marker = root / "hold-executions.txt"
-        held = send(agent["id"], "hold:" + str(marker), "crash-running")
-        wait_until(lambda: task(held["id"])["state"] == "accepted" and marker.exists(), "accepted ACP task before crash")
-        assert marker.read_text().splitlines() == ["prompt-started"]
+        held = send(peer["id"], "crash-running", "crash-running")
+        wait_until(lambda: task(held["id"])["state"] == "delivered", "PTY task before crash")
+        acknowledged = peer_call("task.ack", {"id": held["id"]})
+        assert "error" not in acknowledged and acknowledged["result"]["state"] == "accepted"
         rpc.close()
         rpc = None
         daemon.kill()
         daemon.wait(timeout=5)
         log_file.close()
+
+        # Reintroduce a persisted legacy pane solely to exercise restart rejection.
+        db = sqlite3.connect(home / "state.db")
+        try:
+            persisted = json.loads(db.execute("SELECT body FROM state WHERE id=1").fetchone()[0])
+            persisted["panes"].append({"id": "legacy-acp", "name": "legacy-acp", "kind": "worker",
+                "backend": "acp", "command": acp_command, "cwd": str(root), "workspace": str(root),
+                "state": "exited", "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+            db.execute("UPDATE state SET body=? WHERE id=1", (json.dumps(persisted),))
+            db.commit()
+        finally:
+            db.close()
         launch()
         recovered = task(held["id"])
         assert recovered["state"] == "unknown", "running task was not marked unknown after restart"
-        assert task(first["id"])["result"] == "fixture stream result"
+        assert task(first["id"])["result"] == "[dev-fixture] handled: stream"
         assert task(first["id"])["state"] == "completed"
         assert any(value["name"] == "smoke" for value in rpc.call("state.get", {"frames": False})["layers"])
-        rpc.call("pane.restart", {"id": agent["id"]})
-        time.sleep(0.3)
+        acp_rejected("pane.restart", {"id": "legacy-acp"})
+        assert not acp_marker.exists(), "legacy ACP restart executed its command"
+        record("legacy_acp_restart_rejected")
+
+        # A restarted peer must not replay old inbox commands, especially a
+        # blocking task.next from the preceding claim/result check.
+        inbox.write_text("")
+        outbox.write_text("")
+        rpc.call("pane.restart", {"id": peer["id"]})
+        wait_until(lambda: "PEER_READY" in screen_text(rpc.call("pane.screen", {"id": peer["id"]})), "restarted peer")
+        own_pids.add(int(outbox.with_suffix(".pid").read_text()))
+        assert "crash-running" not in screen_text(rpc.call("pane.screen", {"id": peer["id"]})), "unknown task replayed"
+        fresh = send(peer["id"], "post-restart-new-task", "post-restart-new-task")
+        wait_until(lambda: task(fresh["id"])["state"] == "delivered", "post-restart PTY delivery")
+        assert "error" not in peer_call("task.ack", {"id": fresh["id"]})
+        assert "error" not in peer_call("task.result", {"id": fresh["id"], "result": "post restart result"})
+        assert completed(fresh["id"])["result"] == "post restart result"
         assert task(held["id"])["state"] == "unknown"
-        assert marker.read_text().splitlines() == ["prompt-started"], "unknown task replayed"
-        fresh = send(agent["id"], "stream", "post-restart-new-task")
-        assert completed(fresh["id"])["result"] == "fixture stream result"
-        assert marker.read_text().splitlines() == ["prompt-started"]
         record("daemon_sigkill_recovery_without_replay", unknown_task=held["id"], preserved_task=first["id"])
         report["status"] = "passed"
     except Exception as exc:
@@ -349,7 +346,7 @@ def run(args):
             report["status"] = "failed"
             report["error"] = "Go race detector reported a data race"
         # Only PIDs written by this run's own fixture are considered for cleanup.
-        # Pipe EOF normally exits ACP fixtures; this handles an interrupted run.
+        # Pipe EOF normally exits fixtures; this also handles an interrupted run.
         fixture_pids = root / "fixture-pids.jsonl"
         if fixture_pids.exists():
             for line in fixture_pids.read_text().splitlines():

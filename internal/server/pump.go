@@ -59,6 +59,50 @@ func (s *Server) pumpLoop(paneID string, st *pumpState) {
 	}
 }
 
+// taskQueueLess is the single queue-order rule for push, pull and prompt.
+// Briefs stay ahead of delegated work; stable sorting preserves insertion order
+// for legacy records with identical timestamps.
+func taskQueueLess(a, b *model.Task) bool {
+	if (a.Kind == model.TaskKindBrief) != (b.Kind == model.TaskKindBrief) {
+		return a.Kind == model.TaskKindBrief
+	}
+	return a.CreatedAt.Before(b.CreatedAt)
+}
+
+// orderedQueuedTasksLocked filters revoked grants before ordering. The caller
+// holds s.mu; each backend still performs its own state transition and Save.
+func (s *Server) orderedQueuedTasksLocked(paneID string) []*model.Task {
+	order := make([]*model.Task, 0, len(s.state.Tasks))
+	for i := range s.state.Tasks {
+		t := &s.state.Tasks[i]
+		if t.To == paneID && t.State == "queued" && (t.From == "controller" || s.hasEdgeLocked(t.From, paneID)) {
+			order = append(order, t)
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool { return taskQueueLess(order[i], order[j]) })
+	return order
+}
+
+// nextQueuedTaskLocked applies the common ordering and current delivery
+// capabilities. If taskID is set, a stale pump selection cannot fall through to
+// different work. State transition and persistence remain in the caller.
+func (s *Server) nextQueuedTaskLocked(paneID, mode, taskID string) *model.Task {
+	p := s.paneLocked(paneID)
+	if p == nil || p.State != "running" {
+		return nil
+	}
+	caps := p.EffectiveCaps()
+	if !caps.ReceiveTasks || mode == "prompt" && (p.Backend != "acp" || !caps.Prompt) || mode == "pull" && !caps.Pull {
+		return nil
+	}
+	for _, t := range s.orderedQueuedTasksLocked(paneID) {
+		if (taskID == "" || t.ID == taskID) && taskMode(*t) == mode {
+			return t
+		}
+	}
+	return nil
+}
+
 // pumpStep delivers at most one queued task for this pane, in FIFO order, and
 // only when the pane has no task in flight. A failed gate leaves the task
 // queued with a reason; the next event decides whether to try again.
@@ -87,14 +131,7 @@ func (s *Server) pumpStep(paneID string) {
 	}
 	var pick *model.Task
 	var mode string
-	order := make([]*model.Task, 0, len(s.state.Tasks))
-	for i := range s.state.Tasks {
-		t := &s.state.Tasks[i]
-		if t.To == paneID && t.State == "queued" && (t.From == "controller" || s.hasEdgeLocked(t.From, paneID)) {
-			order = append(order, t)
-		}
-	}
-	sort.SliceStable(order, func(i, j int) bool { return order[i].CreatedAt.Before(order[j].CreatedAt) })
+	order := s.orderedQueuedTasksLocked(paneID)
 	caps := p.EffectiveCaps()
 	steerBusy := false
 	for i := range s.state.Tasks {
@@ -119,9 +156,13 @@ func (s *Server) pumpStep(paneID string) {
 			}
 			m = "push"
 		}
-		if m == "prompt" && (!caps.Prompt || p.Backend != "acp") {
-			if t.QueueReason != "caps: 目标已不再接受 prompt 投递" {
-				t.QueueReason = "caps: 目标已不再接受 prompt 投递"
+		if !caps.ReceiveTasks || m == "prompt" && (!caps.Prompt || p.Backend != "acp") {
+			reason := "caps: 目标已不再接受 prompt 投递"
+			if !caps.ReceiveTasks {
+				reason = "caps: 目标已不再接受任务投递"
+			}
+			if t.QueueReason != reason {
+				t.QueueReason = reason
 				t.UpdatedAt = time.Now()
 				s.saveLocked()
 			}
@@ -156,7 +197,7 @@ func (s *Server) pumpStep(paneID string) {
 	s.mu.Unlock()
 
 	if mode == "prompt" {
-		s.runQueue(paneID)
+		s.runQueueTask(paneID, id)
 		return
 	}
 	lane := s.inputLane(paneID)

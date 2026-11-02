@@ -164,6 +164,21 @@ func (s *Server) sendTask(principal string, raw json.RawMessage) (model.Task, er
 }
 
 func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf string) (model.Task, error) {
+	t, err := s.prepareTaskLocked(principal, a, retryOf)
+	if err != nil {
+		return model.Task{}, err
+	}
+	// Idempotent sends return the existing record instead of appending it.
+	if s.taskLocked(t.ID) == nil {
+		s.state.Tasks = append(s.state.Tasks, t)
+	}
+	return t, s.saveLocked()
+}
+
+// prepareTaskLocked performs every validation and constructs a task without
+// changing state or saving it. Composite operations can therefore finish all
+// validation before committing their related changes in one Save.
+func (s *Server) prepareTaskLocked(principal string, a model.SendParams, retryOf string) (model.Task, error) {
 	if strings.TrimSpace(a.Prompt) == "" || len(a.Prompt) > 1<<20 {
 		return model.Task{}, errors.New("任务内容不能为空且不得超过 1 MiB")
 	}
@@ -297,8 +312,7 @@ func (s *Server) createTaskLocked(principal string, a model.SendParams, retryOf 
 		origin = "human"
 	}
 	t := model.Task{ID: newID("t-"), From: principal, Origin: origin, To: a.To, Prompt: a.Prompt, Kind: a.Kind, State: "queued", Workspace: p.Workspace, DeliveryMode: a.DeliveryMode, OnComplete: a.OnComplete, ReportTo: a.ReportTo, ParentTask: a.ParentTask, RetryOf: retryOf, DedupeKey: a.DedupeKey, IdempotencyKey: a.IdempotencyKey, CreatedAt: now, UpdatedAt: now}
-	s.state.Tasks = append(s.state.Tasks, t)
-	return t, s.saveLocked()
+	return t, nil
 }
 
 func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
@@ -318,6 +332,10 @@ func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
 		s.mu.Unlock()
 		return nil, errors.New("ACP 任务由 prompt 通道自动接收，不需要 next")
 	}
+	// Authentication happens before dispatch, but a long poll outlives that
+	// check. Capture the run before any wait and revalidate it before every
+	// inspection or claim; a restarted pane can never be claimed by this call.
+	runID := s.runs[principal]
 	s.mu.Unlock()
 
 	timeout := 30 * time.Second
@@ -335,20 +353,17 @@ func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
 			s.mu.Unlock()
 			return nil, errors.New("daemon 正在关闭")
 		}
+		if s.runs[principal] != runID {
+			s.mu.Unlock()
+			return nil, errors.New("pane 凭证已失效，请使用新运行代次重新调用 next")
+		}
 		for _, t := range s.state.Tasks {
 			if t.To == principal && (t.State == "running" || (t.State == "accepted" && taskMode(t) == "pull")) {
 				s.mu.Unlock()
 				return nil, errors.New("已有领取中的任务，请先提交 result")
 			}
 		}
-		for i := range s.state.Tasks {
-			t := &s.state.Tasks[i]
-			if t.To != principal || t.State != "queued" || taskMode(*t) != "pull" {
-				continue
-			}
-			if t.From != "controller" && !s.hasEdgeLocked(t.From, t.To) {
-				continue
-			}
+		if t := s.nextQueuedTaskLocked(principal, "pull", ""); t != nil {
 			now := time.Now()
 			t.State = "running"
 			t.AcceptedAt = &now
@@ -365,7 +380,7 @@ func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
 		if timeout == 0 || time.Now().After(deadline) {
 			return nil, nil
 		}
-		ch, ok := s.registerNextWaiter(principal)
+		ch, ok := s.registerNextWaiter(principal, runID)
 		if !ok {
 			return nil, errors.New("已有等待中的 next；同一个 pane 不要并发领取")
 		}
@@ -377,13 +392,13 @@ func (s *Server) nextTask(principal string, raw json.RawMessage) (any, error) {
 		select {
 		case <-s.ctx.Done():
 			timer.Stop()
-			s.clearNextWaiter(principal, ch)
+			s.clearNextWaiter(principal, runID, ch)
 			return nil, errors.New("daemon 正在关闭")
 		case <-ch:
 			timer.Stop()
 		case <-timer.C:
 		}
-		s.clearNextWaiter(principal, ch)
+		s.clearNextWaiter(principal, runID, ch)
 	}
 }
 
@@ -416,13 +431,14 @@ func (s *Server) waitTask(principal string, raw json.RawMessage) (any, error) {
 		s.taskWaiters = map[string]chan struct{}{}
 	}
 	ch := make(chan struct{}, 1)
-	s.taskWaiters[a.ID] = ch
+	// Server.taskWaiters predates multi-waiter support. A unique compound key
+	// keeps that storage compatible while allowing every waiter its own slot.
+	waiterKey := fmt.Sprintf("%s\x00%p", a.ID, ch)
+	s.taskWaiters[waiterKey] = ch
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		if s.taskWaiters[a.ID] == ch {
-			delete(s.taskWaiters, a.ID)
-		}
+		delete(s.taskWaiters, waiterKey)
 		s.mu.Unlock()
 	}()
 
@@ -448,16 +464,28 @@ func (s *Server) waitTask(principal string, raw json.RawMessage) (any, error) {
 		s.mu.Unlock()
 		select {
 		case <-s.ctx.Done():
-			return copy, nil
 		case <-ch:
+			continue
 		case <-timer.C:
-			return copy, nil
 		}
+		// A timeout or shutdown is not a reason to return the pre-wait snapshot.
+		// Re-read the record so callers always observe the latest committed state.
+		s.mu.Lock()
+		t = s.taskLocked(a.ID)
+		if t == nil {
+			s.mu.Unlock()
+			return nil, errors.New("任务不存在")
+		}
+		copy = *t
+		s.mu.Unlock()
+		return copy, nil
 	}
 }
 
 func finished(state string) bool {
-	return state == "completed" || state == "failed" || state == "cancelled"
+	// Unknown is quiescent: automatic execution has stopped and the caller must
+	// inspect the uncertainty rather than wait for a result that may never come.
+	return state == "completed" || state == "failed" || state == "cancelled" || state == "unknown"
 }
 
 // taskContentBytesLocked reports the retained prompt/result bytes. It is a
@@ -538,8 +566,9 @@ func (s *Server) finishTask(principal string, raw json.RawMessage, manual bool) 
 	copy := *s.taskLocked(a.ID)
 	err := s.saveLocked()
 	s.mu.Unlock()
-	s.notifyTaskWaiter(a.ID)
-	s.wake(copy.To)
+	if err == nil {
+		s.wake(copy.To)
+	}
 	return copy, err
 }
 
@@ -599,6 +628,12 @@ func (s *Server) getTasks(principal, method string, raw json.RawMessage) (any, e
 }
 
 func (s *Server) runQueue(paneID string) {
+	s.runQueueTask(paneID, "")
+}
+
+// runQueueTask consumes the candidate selected by pump, then re-enters the
+// shared selector after every turn. taskID is empty for legacy/internal callers.
+func (s *Server) runQueueTask(paneID, taskID string) {
 	for {
 		s.mu.Lock()
 		if s.storeErr != nil || s.ctx.Err() != nil {
@@ -611,28 +646,22 @@ func (s *Server) runQueue(paneID string) {
 			s.mu.Unlock()
 			return
 		}
-		var taskID, prompt string
-		for i := range s.state.Tasks {
-			t := &s.state.Tasks[i]
-			if t.To == paneID && t.State == "queued" && (t.DeliveryMode == "prompt" || t.DeliveryMode == "") && (t.From == "controller" || s.hasEdgeLocked(t.From, paneID)) {
-				t.State = "delivered"
-				t.DeliveryMode = "prompt"
-				t.DeliveredVia = "prompt"
-				t.DeliveryStatus = "submitted"
-				t.DeliveryError = ""
-				t.QueueReason = ""
-				now := time.Now()
-				t.DeliveredAt = &now
-				t.UpdatedAt = now
-				taskID = t.ID
-				prompt = t.Prompt
-				break
-			}
-		}
-		if taskID == "" {
+		t := s.nextQueuedTaskLocked(paneID, "prompt", taskID)
+		if t == nil {
 			s.mu.Unlock()
 			return
 		}
+		t.State = "delivered"
+		t.DeliveryMode = "prompt"
+		t.DeliveredVia = "prompt"
+		t.DeliveryStatus = "submitted"
+		t.DeliveryError = ""
+		t.QueueReason = ""
+		now := time.Now()
+		t.DeliveredAt = &now
+		t.UpdatedAt = now
+		taskID = t.ID
+		prompt := t.Prompt
 		p.TurnState = "running"
 		runID := s.runs[paneID]
 		turnCtx, turnCancel := context.WithCancel(s.ctx)
@@ -652,46 +681,56 @@ func (s *Server) runQueue(paneID string) {
 		s.mu.Unlock()
 		result, err := a.Prompt(turnCtx, prompt)
 		turnCancel()
-		s.mu.Lock()
-		delete(s.taskCancels, taskID)
-		if s.closing || s.runs[paneID] != runID {
-			s.mu.Unlock()
+		if !s.finishPrompt(paneID, runID, taskID, result, err) {
 			return
 		}
-		t := s.taskLocked(taskID)
-		p = s.paneLocked(paneID)
-		if t != nil && (activeState(t.State) || t.State == "unknown") {
-			t.State = "completed"
-			stored := result
-			if err != nil {
-				t.State = "failed"
-				stored = err.Error()
-				if agent.IsUncertain(err) {
-					t.State = "unknown"
-				} else if errors.Is(err, context.Canceled) {
-					t.State = "cancelled"
-				}
-			}
-			if len(stored) > 1<<20 {
-				stored = short(stored, 250000)
-				t.State = "failed"
-				stored = "结果超过 1 MiB，已截断：\n" + stored
-			}
-			if capErr := s.setTaskResultLocked(t, stored); capErr != nil {
-				t.State = "failed"
-				t.Result = capErr.Error()
-			}
-			t.UpdatedAt = time.Now()
-			t.Seen = false
-			s.completeReportLocked(t)
-		}
-		p = s.paneLocked(paneID)
-		if p != nil && s.runs[paneID] == runID && p.State == "running" {
-			p.TurnState = "idle"
-		}
-		s.saveLocked()
-		s.mu.Unlock()
+		// A pump-selected ID applies to one turn only; later turns must run the
+		// full ordering, authorization, capability and busy checks again.
+		taskID = ""
 	}
+}
+
+// finishPrompt commits one ACP turn result and releases its pane. Waiters are
+// notified only after the state and any completion report are durable.
+func (s *Server) finishPrompt(paneID, runID, taskID, result string, promptErr error) bool {
+	s.mu.Lock()
+	delete(s.taskCancels, taskID)
+	if s.closing || s.runs[paneID] != runID {
+		s.mu.Unlock()
+		return false
+	}
+	t := s.taskLocked(taskID)
+	if t != nil && (activeState(t.State) || t.State == "unknown") {
+		t.State = "completed"
+		stored := result
+		if promptErr != nil {
+			t.State = "failed"
+			stored = promptErr.Error()
+			if agent.IsUncertain(promptErr) {
+				t.State = "unknown"
+			} else if errors.Is(promptErr, context.Canceled) {
+				t.State = "cancelled"
+			}
+		}
+		if len(stored) > 1<<20 {
+			stored = short(stored, 250000)
+			t.State = "failed"
+			stored = "结果超过 1 MiB，已截断：\n" + stored
+		}
+		if capErr := s.setTaskResultLocked(t, stored); capErr != nil {
+			t.State = "failed"
+			t.Result = capErr.Error()
+		}
+		t.UpdatedAt = time.Now()
+		t.Seen = false
+		s.completeReportLocked(t)
+	}
+	if p := s.paneLocked(paneID); p != nil && p.State == "running" {
+		p.TurnState = "idle"
+	}
+	err := s.saveLocked()
+	s.mu.Unlock()
+	return err == nil
 }
 
 func (s *Server) cancelTask(raw json.RawMessage) (any, error) {
@@ -750,14 +789,39 @@ func (s *Server) cancelTask(raw json.RawMessage) (any, error) {
 		cancel()
 	}
 	if running && a == nil && !args.Confirmed {
-		if term == nil {
-			return copy, errors.New("没有运行中的 PTY；确认停止后使用 confirmed=true")
+		inputErr := errors.New("没有运行中的 PTY；确认停止后使用 confirmed=true")
+		if term != nil {
+			inputErr = term.Input([]byte{3})
 		}
-		if err := term.Input([]byte{3}); err != nil {
-			return copy, err
+		if inputErr != nil {
+			saveErr := s.recordPTYCancellationFailure([]string{args.ID}, inputErr)
+			s.mu.Lock()
+			if current := s.taskLocked(args.ID); current != nil {
+				copy = *current
+			}
+			s.mu.Unlock()
+			return copy, errors.Join(inputErr, saveErr)
 		}
 	}
 	return copy, nil
+}
+
+// recordPTYCancellationFailure preserves the unconfirmed cancellation while
+// making a failed Ctrl-C write visible to both the caller and subsequent reads.
+func (s *Server) recordPTYCancellationFailure(taskIDs []string, inputErr error) error {
+	s.mu.Lock()
+	now := time.Now()
+	for _, id := range taskIDs {
+		if t := s.taskLocked(id); t != nil && t.State == "cancelling" {
+			t.Result = "中断键写入失败；任务仍可能在执行，请检查 pane 后人工确认停止"
+			t.DeliveryError = "cancel_interrupt: " + inputErr.Error()
+			t.UpdatedAt = now
+			t.Seen = false
+		}
+	}
+	err := s.saveLocked()
+	s.mu.Unlock()
+	return err
 }
 
 // promotedAt moves a queued task ahead of every other queued task for its pane.
@@ -787,7 +851,7 @@ func (s *Server) promoteTask(raw json.RawMessage) (model.Task, error) {
 			continue
 		}
 		if other.To == t.To && other.State == "queued" && other.ID != t.ID {
-			if first == nil || other.CreatedAt.Before(first.CreatedAt) {
+			if first == nil || taskQueueLess(other, first) {
 				first = other
 			}
 		}
@@ -876,7 +940,9 @@ func (s *Server) interruptSend(principal string, raw json.RawMessage) (model.Tas
 		if t.Kind == model.TaskKindBrief {
 			continue
 		}
-		if t.To == p.ID && activeState(t.State) {
+		// A PTY/ACP cancellation already requested is not evidence that work
+		// stopped. In particular, never turn PTY cancelling into cancelled here.
+		if t.To == p.ID && activeState(t.State) && t.State != "cancelling" {
 			active = append(active, t)
 		}
 	}
@@ -901,42 +967,79 @@ func (s *Server) interruptSend(principal string, raw json.RawMessage) (model.Tas
 			return model.Task{}, errors.New("任务内容总量已达到 64 MiB 上限")
 		}
 	}
-	var cancels []context.CancelFunc
-	for _, t := range active {
-		if c := s.taskCancels[t.ID]; c != nil {
-			cancels = append(cancels, c)
-		}
-		t.State = "cancelled"
-		t.Result = "被新消息中断"
-		t.UpdatedAt = time.Now()
-		t.Seen = false
-		s.completeReportLocked(t)
-	}
 	var created model.Task
 	var err error
 	if a.Prompt != "" {
 		if a.Kind == "" {
 			a.Kind = "chat"
 		}
-		created, err = s.createTaskLocked(principal, model.SendParams{To: p.ID, Prompt: a.Prompt, DeliveryMode: "", Kind: a.Kind, Queue: true}, "")
-	} else {
-		err = s.saveLocked()
+		created, err = s.prepareTaskLocked(principal, model.SendParams{To: p.ID, Prompt: a.Prompt, DeliveryMode: "", Kind: a.Kind, Queue: true}, "")
+		if err != nil {
+			s.mu.Unlock()
+			return model.Task{}, err
+		}
 	}
-	paneID := p.ID
-	s.mu.Unlock()
+	// Keep enough state to roll back the entire composite operation if its one
+	// durable commit fails. completeReportLocked may append or update reports.
+	priorTasks := append([]model.Task(nil), s.state.Tasks...)
+	priorReports := append([]model.Report(nil), s.state.Reports...)
+	var cancels []context.CancelFunc
+	for _, t := range active {
+		if p.Backend == "pty" {
+			t.State = "cancelling"
+			t.Result = "已请求中断；等待人工确认任务停止，已发生的操作不会撤销"
+			t.DeliveryError = ""
+		} else {
+			if c := s.taskCancels[t.ID]; c != nil {
+				cancels = append(cancels, c)
+			}
+			t.State = "cancelled"
+			t.Result = "被新消息中断"
+		}
+		t.UpdatedAt = time.Now()
+		t.Seen = false
+		s.completeReportLocked(t)
+	}
+	if created.ID != "" {
+		s.state.Tasks = append(s.state.Tasks, created)
+	}
+	// Old tasks, reports and the new task become visible in one durable commit.
+	// Cancellation and delivery are deliberately post-commit side effects.
+	err = s.saveLocked()
 	if err != nil {
+		// Roll back before releasing the state lock. Otherwise a concurrent
+		// snapshot can observe the rejected operation, or a lifecycle commit can
+		// be overwritten by the late rollback.
+		s.state.Tasks = priorTasks
+		s.state.Reports = priorReports
+		s.mu.Unlock()
 		return model.Task{}, err
 	}
+	paneID := p.ID
+	backend := p.Backend
+	term := s.terminals[paneID]
+	activeIDs := make([]string, 0, len(active))
+	for _, old := range active {
+		activeIDs = append(activeIDs, old.ID)
+	}
+	s.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
 	}
-	if len(active) > 0 && p.Backend == "pty" {
+	if len(active) > 0 && backend == "pty" {
 		lane := s.inputLane(paneID)
 		lane.Lock()
-		if term := s.terminals[paneID]; term != nil {
-			_ = term.Input([]byte{3})
+		inputErr := errors.New("没有运行中的 PTY；无法发送中断键")
+		if term != nil {
+			inputErr = term.Input([]byte{3})
 		}
 		lane.Unlock()
+		if inputErr != nil {
+			saveErr := s.recordPTYCancellationFailure(activeIDs, inputErr)
+			// The new message is already durably queued behind the unconfirmed
+			// cancellation; return it together with the interrupt error.
+			return created, errors.Join(inputErr, saveErr)
+		}
 	}
 	if created.ID != "" {
 		s.notifyNextWaiter(created.To)

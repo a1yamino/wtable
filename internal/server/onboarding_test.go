@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,8 +41,17 @@ func TestOnboardingProfilesAndCatalogPrivacy(t *testing.T) {
 		t.Fatalf("reserved override not safely rejected: %v", err)
 	}
 	writeProfiles(t, s, []accountProfile{{Name: "work", Env: map[string]string{"AGENT_SECRET": "do-not-expose"}}})
-	// Keep discovery deterministic; do not execute any installed model clients.
-	t.Setenv("PATH", t.TempDir())
+	// Keep discovery deterministic and prove hidden ACP adapters are not probed.
+	path := t.TempDir()
+	probeMarker := filepath.Join(s.paths.Home, "acp-probed")
+	if err := os.WriteFile(filepath.Join(path, "codex-acp"), []byte("#!/bin/sh\n/usr/bin/touch "+probeMarker+"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", path)
+	custom := `[{"id":"legacy-acp","name":"Legacy ACP","backend":"acp","command":["codex-acp"]}]`
+	if err := os.WriteFile(filepath.Join(s.paths.Home, "presets.json"), []byte(custom), 0600); err != nil {
+		t.Fatal(err)
+	}
 	catalog, err := s.catalog()
 	if err != nil {
 		t.Fatal(err)
@@ -53,8 +63,93 @@ func TestOnboardingProfilesAndCatalogPrivacy(t *testing.T) {
 	if len(catalog.Accounts) != 1 || catalog.Accounts[0] != "work" {
 		t.Fatal(catalog.Accounts)
 	}
-	if len(catalog.Presets) != 5 || catalog.Presets[2].ID != "codex-acp" || catalog.Presets[2].Available || !strings.Contains(catalog.Presets[2].Detail, "单独安装") {
-		t.Fatalf("missing adapter must be explained: %+v", catalog.Presets)
+	if len(catalog.Presets) != 4 {
+		t.Fatalf("PTY-only catalog exposed extra presets: %+v", catalog.Presets)
+	}
+	for _, kind := range []string{model.PaneForeground, model.PaneWorker} {
+		byKind, err := s.catalog(rawTask(map[string]string{"kind": kind}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, preset := range byKind.Presets {
+			if preset.Backend != "pty" {
+				t.Fatalf("%s catalog exposed ACP preset: %+v", kind, preset)
+			}
+		}
+	}
+	if _, err := os.Stat(probeMarker); !os.IsNotExist(err) {
+		t.Fatalf("hidden codex-acp was probed: %v", err)
+	}
+}
+
+func TestACPLaunchEntrypointsFailWithoutSideEffects(t *testing.T) {
+	s := onboardingServer(t)
+	marker := filepath.Join(s.paths.Home, "acp-started")
+	command := []string{"/usr/bin/touch", marker}
+	custom := `[{"id":"legacy-acp","name":"Legacy ACP","backend":"acp","command":["/usr/bin/touch","` + marker + `"]}]`
+	if err := os.WriteFile(filepath.Join(s.paths.Home, "presets.json"), []byte(custom), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.paths.Home, "roles"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	legacyRole := "---\nname: \"legacy\"\nbackend: \"acp\"\n---\nLegacy role\n"
+	if err := os.WriteFile(filepath.Join(s.paths.Home, "roles", "legacy.md"), []byte(legacyRole), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.state.Panes = []model.Pane{{ID: "legacy-pane", Name: "legacy-pane", Kind: model.PaneWorker, Backend: "acp", Command: command, Cwd: s.paths.Home, Workspace: s.paths.Home, State: "exited", CreatedAt: time.Now().Round(0)}}
+	s.mu.Lock()
+	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		t.Fatal(err)
+	}
+	s.mu.Unlock()
+	before, err := s.db.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRejected := func(name string, err error) {
+		t.Helper()
+		if err == nil || err.Error() != acpDisabledError {
+			t.Fatalf("%s error = %v, want %q", name, err, acpDisabledError)
+		}
+		after, loadErr := s.db.Load()
+		if loadErr != nil || !reflect.DeepEqual(after, before) || !reflect.DeepEqual(s.state, before) {
+			t.Fatalf("%s changed state: memory=%+v durable=%+v loadErr=%v", name, s.state, after, loadErr)
+		}
+		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+			t.Fatalf("%s launched ACP command: %v", name, statErr)
+		}
+	}
+
+	for _, test := range []struct {
+		name string
+		args model.SpawnParams
+	}{
+		{name: "direct backend", args: model.SpawnParams{Name: "direct", Kind: model.PaneWorker, Backend: "acp", Command: command, Cwd: s.paths.Home}},
+		{name: "builtin preset", args: model.SpawnParams{Name: "builtin", Preset: "codex-acp", Cwd: s.paths.Home}},
+		{name: "configured preset", args: model.SpawnParams{Name: "configured", Preset: "legacy-acp", Cwd: s.paths.Home}},
+		{name: "legacy role default", args: model.SpawnParams{Name: "role", RoleTemplate: "legacy", Command: command, Cwd: s.paths.Home}},
+	} {
+		_, err := s.dispatch(connection{principal: "controller"}, "pane.spawn", rawTask(test.args))
+		assertRejected(test.name, err)
+	}
+	_, err = s.dispatch(connection{principal: "controller"}, "pane.restart", rawTask(map[string]string{"id": "legacy-pane"}))
+	assertRejected("existing pane restart", err)
+}
+
+func TestRolePutRejectsACPDefaults(t *testing.T) {
+	s := onboardingServer(t)
+	for _, role := range []model.RoleTemplate{
+		{Name: "backend-acp", Backend: "acp", Instructions: "legacy"},
+		{Name: "preset-acp", Preset: "codex-acp", Instructions: "legacy"},
+	} {
+		if _, err := s.putRole(role); err == nil || err.Error() != acpDisabledError {
+			t.Fatalf("putRole(%s) error = %v", role.Name, err)
+		}
+		if _, err := os.Stat(filepath.Join(s.paths.Home, "roles", role.Name+".md")); !os.IsNotExist(err) {
+			t.Fatalf("rejected role %s was written: %v", role.Name, err)
+		}
 	}
 }
 

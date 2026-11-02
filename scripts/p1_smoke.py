@@ -41,7 +41,7 @@ def run(args):
     # cbreak retains CR-to-LF translation, so actual Enter still completes each line.
     (home / "presets.json").write_text(json.dumps([
         {"id": "acp-fixture", "name": "ACP fixture", "backend": "acp", "command": [sys.executable, str(script_dir / "fixtures/acp_agent.py"), "--root", str(root)]},
-        {"id": "echo-fixture", "name": "Echo fixture", "backend": "pty", "command": [sys.executable, "-u", "-c", "import os,sys,tty\nfrom pathlib import Path\ntty.setcbreak(0)\np=Path(" + repr(str(root)) + ")/(os.environ['WTABLE_PANE_ID']+'.input')\nfor line in sys.stdin:\n with p.open('a') as f: f.write(line)"]},
+        {"id": "echo-fixture", "name": "Echo fixture", "backend": "pty", "command": [sys.executable, str(script_dir / "fixtures/pty_echo.py"), "--root", str(root), "--mode", "echo"]},
     ]))
     env = dict(os.environ, WTABLE_HOME=str(home), TERM="xterm-256color")
 
@@ -128,6 +128,9 @@ def run(args):
         wait_until(lambda: shown("seed"), "initial TUI")
         open_panel(); ready_panel()
         presets = rpc.call("preset.list")["presets"]
+        assert all(p["backend"] == "pty" for p in presets)
+        assert not any(p["id"] == "acp-fixture" for p in presets)
+        record("preset_catalog_hides_acp")
         echo_index = next(i for i, p in enumerate(presets) if p["id"] == "echo-fixture")
         for name in ["alpha", "beta", "gamma"]:
             ensure_panel()
@@ -229,31 +232,26 @@ def run(args):
         send("e"); wait_until(lambda: shown("名字"), "agent form")
         send("chat")
         catalog = rpc.call("preset.list")
-        acp_index = next(i for i, p in enumerate(catalog["presets"]) if p["id"] == "acp-fixture")
-        tab(); send(b"\x1b[H" + b"\x1b[C" * acp_index)
+        echo_index = next(i for i, p in enumerate(catalog["presets"]) if p["id"] == "echo-fixture")
+        tab(); send(b"\x1b[H" + b"\x1b[C" * echo_index)
         tab(9); send(b"\r")
-        wait_until(lambda: pane("chat") and pane("chat")["state"] == "running", "ACP create"); ready_panel()
-        chat = pane("chat"); wait_until(lambda: task(chat["brief_task"])["state"] == "completed", "ACP brief completion")
-        esc(); send(b"\r"); wait_until(lambda: shown("Ctrl-J 换行"), "persistent ACP composer")
-        send("direct ACP prompt\r")
-        direct = wait_until(lambda: next((t for t in rpc.call("task.list") if t["prompt"] == "direct ACP prompt"), None), "ACP typed task")
-        wait_until(lambda: task(direct["id"])["state"] == "completed", "ACP direct result")
-        assert pane("chat")["session_id"] == chat["session_id"]
-        record("ACP_persistent_input_reuses_existing_session_and_task_queue")
+        wait_until(lambda: pane("chat") and pane("chat")["state"] == "running", "PTY create"); ready_panel()
+        chat = pane("chat"); finish_brief("chat")
+        esc(); send(b"\r")
+        send("direct PTY prompt\r")
+        wait_until(lambda: received(chat, "direct PTY prompt"), "PTY direct input")
+        assert pane("chat")["id"] == chat["id"] and pane("chat")["state"] == "running"
+        record("PTY_direct_input_reuses_running_pane")
 
         def find_task(prompt):
             return next((t for t in rpc.call("task.list") if t["prompt"] == prompt), None)
 
-        # Queue visibility: while the pane is busy, Enter queues and says where.
-        hold_marker = root / "hold.marker"
-        hold = rpc.call("task.send", {"to": chat["id"], "prompt": "hold:" + str(hold_marker)})
-        wait_until(lambda: hold_marker.exists(), "hold turn started")
-        for index, text in enumerate(["first queued message", "second queued message", "third queued message"], 1):
-            send(text + "\r")
+        # PTY tasks retain the same queue panel; completion drains queued work.
+        hold = rpc.call("task.send", {"to": chat["id"], "prompt": "PTY queue head"})
+        wait_until(lambda: task(hold["id"])["state"] == "delivered", "PTY queue head delivered")
+        for text in ["first queued message", "second queued message", "third queued message"]:
+            rpc.call("task.send", {"to": chat["id"], "prompt": text, "queue": True})
             wait_until(lambda text=text: find_task(text) is not None, "queued message created")
-            wait_until(lambda index=index: shown("第 %d 位" % index), "queue position %d" % index)
-        screenshot = screen()
-        assert "第 3 位" in screenshot
         key(" "); wait_until(lambda: shown("命令面板"), "queue palette")
         send("队列"); send(b"\r")
         try:
@@ -262,31 +260,17 @@ def run(args):
             print("SCREEN AT QUEUE PANEL:\n" + screen(), flush=True)
             print("TASKS", [(t["prompt"], t["state"]) for t in rpc.call("task.list") if t["to"] == chat["id"]], flush=True)
             raise
-        screenshot = screen()
-        assert "second queued message" in screenshot
+        assert "second queued message" in screen()
         send(b"\x1b[B"); send("x")
         wait_until(lambda: task(find_task("second queued message")["id"])["state"] == "cancelled", "queued message cancelled")
         send(b"\x1b")
         wait_until(lambda: not shown("队列 · chat"), "queue panel closed")
-        # Interrupt-then-send is two-stage and records the cancelled reason.
-        send("after interrupt")
-        wait_until(lambda: shown("after interrupt"), "draft typed")
-        key("\r")  # Ctrl-a Enter: first press only warns
-        wait_until(lambda: shown("未完成的工作可能丢失"), "interrupt confirmation")
-        assert task(hold["id"])["state"] in ("running", "accepted", "delivered")
-        send(b"\r")  # second Enter confirms
-        wait_until(lambda: task(hold["id"])["state"] == "cancelled", "hold turn interrupted")
-        assert "中断" in task(hold["id"])["result"]
-        replacement = wait_until(lambda: find_task("after interrupt"), "replacement message queued")
-        wait_until(lambda: task(replacement["id"])["state"] == "completed", "replacement completed")
-        record("queue_positions_are_visible_queue_panel_cancels_and_interrupt_is_two_stage")
-        target = root / "permission-effect.txt"
-        approval_task = rpc.call("task.send", {"to": chat["id"], "prompt": "permission:" + str(target)})
-        wait_until(lambda: state()["permissions"], "permission request"); wait_until(lambda: shown("请求批准"), "permission visible")
-        send(b"\r"); time.sleep(.1); assert state()["permissions"] and not target.exists()
-        key("p")  # approvals are non-blocking: focus the card explicitly
-        send("1"); wait_until(lambda: task(approval_task["id"])["state"] == "completed", "permission rejected")
-        assert not target.exists(); record("ACP_permission_priority_prevents_Enter_approval")
+        rpc.call("task.done", {"id": hold["id"], "result": "queue head complete"})
+        for text in ["first queued message", "third queued message"]:
+            queued = find_task(text)
+            wait_until(lambda queued=queued: task(queued["id"])["state"] == "delivered", "queued PTY delivery")
+            rpc.call("task.done", {"id": queued["id"], "result": "queued PTY complete"})
+        record("queue_panel_cancels_queued_pty_task_and_completion_drains_queue")
         peer_result = root / "peer-permissions.json"
         peer_code = "\n".join([
             "import os,sys,json", "from pathlib import Path",

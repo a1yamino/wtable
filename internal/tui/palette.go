@@ -34,7 +34,7 @@ func (u *ui) paletteItems() []paletteItem {
 			u.palette = nil
 			u.openCreate(model.PaneForeground)
 		}},
-		{label: "新建 worker", hint: "PTY 或 ACP；新建到左栏", run: func() {
+		{label: "新建 worker", hint: "仅 PTY；新建到左栏", run: func() {
 			u.palette = nil
 			u.openCreate(model.PaneWorker)
 		}},

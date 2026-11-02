@@ -133,6 +133,20 @@ func (s *Server) putRole(role model.RoleTemplate) (model.RoleTemplate, error) {
 	if err := validateRole(role); err != nil {
 		return model.RoleTemplate{}, err
 	}
+	if role.Backend == "acp" {
+		return model.RoleTemplate{}, errors.New(acpDisabledError)
+	}
+	if role.Preset != "" {
+		presets, err := s.configuredPresets()
+		if err != nil {
+			return model.RoleTemplate{}, err
+		}
+		for _, preset := range presets {
+			if preset.ID == role.Preset && preset.Backend == "acp" {
+				return model.RoleTemplate{}, errors.New(acpDisabledError)
+			}
+		}
+	}
 	dir := filepath.Join(s.paths.Home, "roles")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return model.RoleTemplate{}, err

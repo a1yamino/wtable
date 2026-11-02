@@ -142,15 +142,16 @@ def run(args):
         session.send("新建 worker")
         session.send(b"\r")
         wait_until(lambda: session.shown("新建 worker"), "worker picker")
-        wait_until(lambda: session.shown("ACP fixture"), "ACP appears for workers")
-        session.send(b"\x1b[B")
-        session.send(b"\x1b[B")  # shell, pty fixture, acp fixture
+        assert session.shown("PTY fixture"), session.screen()
+        assert not session.shown("ACP fixture"), "ACP must not appear in the worker preset list"
+        session.send(b"\x1b[B")  # shell, pty fixture
         session.send(b"\r")
-        worker = wait_until(lambda: next((p for p in session.panes() if p["name"] == "acp-fixture"), None), "ACP worker")
-        wait_until(lambda: next(p for p in session.panes() if p["id"] == worker["id"])["state"] == "running", "ACP worker running")
-        assert worker["kind"] == "worker" and worker["backend"] == "acp", worker
+        worker = wait_until(lambda: next((p for p in session.panes()
+            if p.get("preset") == "pty-fixture" and p["kind"] == "worker"), None), "PTY worker")
+        wait_until(lambda: next(p for p in session.panes() if p["id"] == worker["id"])["state"] == "running", "PTY worker running")
+        assert worker["kind"] == "worker" and worker["backend"] == "pty", worker
         assert next(p for p in session.panes() if p["id"] == pane["id"])["kind"] == "foreground"
-        record("worker_flow_offers_acp_and_does_not_replace_the_foreground")
+        record("worker_flow_hides_acp_and_does_not_replace_the_foreground")
         session.close()
         session = None
 

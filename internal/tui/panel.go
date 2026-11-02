@@ -309,7 +309,7 @@ func (u *ui) startAgentForm(edit bool) {
 	p.fields = []panelField{
 		textField("name", "名字", ""),
 		optionField("preset", "预设", "shell", presets),
-		optionField("backend", "后端（自定义命令）", "pty", []panelOption{{"pty", "PTY 终端"}, {"acp", "ACP 会话"}}),
+		optionField("backend", "后端（自定义命令，PTY-only）", "pty", []panelOption{{"pty", "PTY 终端"}}),
 		textField("command", "自定义命令（支持引号；变量按字面传入）", ""),
 		textField("cwd", "目录", cwd),
 		optionField("layer", "Layer", u.activeLayer, u.layerOptions()),
@@ -705,9 +705,6 @@ func (u *ui) panelFormKey(e *tcell.EventKey) {
 			for _, preset := range p.catalog.Presets {
 				if preset.ID == f.value() {
 					p.get("backend").choice = 0
-					if preset.Backend == "acp" {
-						p.get("backend").choice = 1
-					}
 					p.get("brief").choice = 0
 					if preset.ID != "shell" {
 						p.get("brief").choice = 1
@@ -1007,9 +1004,6 @@ func (u *ui) applyPresetDefaults() {
 		}
 		if b := p.get("backend"); b != nil {
 			b.choice = 0
-			if preset.Backend == "acp" {
-				b.choice = 1
-			}
 		}
 		if b := p.get("brief"); b != nil {
 			b.choice = 0

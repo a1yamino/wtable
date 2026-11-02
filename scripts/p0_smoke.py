@@ -198,15 +198,12 @@ def run(args):
         assert not any(r["id"] == revoked_report["id"] for r in peer_ok("observer", "report.list", {}))
         record("revoked_report_undeliverable_even_after_controller_done")
 
-        acp = spawn("acp", [sys.executable, str(base / "fixtures/acp_agent.py"), "--root", str(root)], backend="acp")
-        acp_task = send(acp, "stream")
-        wait_until(lambda: get(acp_task)["state"] == "completed", "ACP completion")
-        assert get(acp_task)["result"] == "fixture stream result" and get(acp_task).get("accepted_at")
-        held = send(acp, "hold:" + str(root / "hold-marker"))
-        wait_until(lambda: get(held)["state"] == "accepted", "ACP accepted update")
-        rpc.call("task.cancel", {"id": held["id"]})
-        wait_until(lambda: get(held)["state"] == "cancelled", "ACP cancellation")
-        record("acp_update_acceptance_auto_result_and_confirmed_cancel")
+        auto = spawn("auto", [sys.executable, str(base / "fixtures/pty_echo.py"),
+                              "--root", str(root), "--mode", "auto"])
+        auto_task = send(auto, "stream")
+        wait_until(lambda: get(auto_task)["state"] == "completed", "PTY auto completion")
+        assert get(auto_task)["result"] == "[dev-fixture] handled: stream" and get(auto_task).get("accepted_at")
+        record("pty_update_acceptance_and_auto_result")
 
         # Stop confirmation is a distinct human action, not inferred from Ctrl-C.
         time.sleep(.05)

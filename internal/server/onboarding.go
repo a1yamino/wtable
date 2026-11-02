@@ -108,16 +108,15 @@ func (s *Server) catalog(input ...json.RawMessage) (model.Catalog, error) {
 	if err != nil {
 		return model.Catalog{}, err
 	}
-	if args.Kind == model.PaneForeground {
-		// Foreground panes are PTY-only; ACP is a worker backend.
-		filtered := presets[:0]
-		for _, p := range presets {
-			if p.Backend == "pty" {
-				filtered = append(filtered, p)
-			}
+	// ACP adapters are retained in configuredPresets for future restoration,
+	// but are never discoverable or launchable while the product is PTY-only.
+	filtered := presets[:0]
+	for _, p := range presets {
+		if p.Backend == "pty" {
+			filtered = append(filtered, p)
 		}
-		presets = filtered
 	}
+	presets = filtered
 	profiles, err := s.accountProfiles()
 	if err != nil {
 		return model.Catalog{}, err
@@ -128,7 +127,7 @@ func (s *Server) catalog(input ...json.RawMessage) (model.Catalog, error) {
 		s.catalogVersions = map[string]string{}
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		for _, name := range []string{"codex", "codex-acp", "claude", "agy"} {
+		for _, name := range []string{"codex", "claude", "agy"} {
 			path, e := exec.LookPath(name)
 			if e != nil {
 				continue
@@ -161,9 +160,6 @@ func (s *Server) catalog(input ...json.RawMessage) (model.Catalog, error) {
 		p.Available = e == nil
 		if !p.Available {
 			p.Detail = "未找到可执行文件：" + p.Command[0]
-			if p.ID == "codex-acp" {
-				p.Detail += "；需要单独安装 ACP 适配器，不会自动安装"
-			}
 		} else {
 			p.Detail = "二进制已找到；登录态与协议兼容性须在启动后确认"
 		}
@@ -198,6 +194,9 @@ func (s *Server) resolvePreset(args *model.SpawnParams) error {
 	for _, p := range presets {
 		if p.ID != args.Preset {
 			continue
+		}
+		if p.Backend == "acp" {
+			return errors.New(acpDisabledError)
 		}
 		if args.Backend != "" && args.Backend != p.Backend {
 			return errors.New("backend 与预设不匹配")

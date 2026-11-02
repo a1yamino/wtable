@@ -242,8 +242,8 @@ func run(args []string) error {
 		name := fs.String("name", "", "pane 名称")
 		dir := fs.String("dir", cwd, "工作目录")
 		wsFlag := fs.String("workspace", defaultWorkspace, "工作区目录（默认跟随 --workspace/WTABLE_WORKSPACE，否则当前目录）")
-		backend := fs.String("backend", "", "pty 或 acp（默认使用预设后端，否则 pty）")
-		kind := fs.String("kind", "", "foreground 或 worker（省略时：无前台则第一个 PTY 成为前台，ACP 永远是 worker）")
+		backend := fs.String("backend", "", "后端（仅 pty；默认使用预设后端，否则 pty）")
+		kind := fs.String("kind", "", "foreground 或 worker（省略时：无前台则第一个成为前台）")
 		preset := fs.String("preset", "", "启动预设 ID")
 		role := fs.String("role", "", "角色说明")
 		roleTemplate := fs.String("role-template", "", "角色模板名称（创建时快照）")
@@ -336,7 +336,6 @@ func run(args []string) error {
 		if len(args) != 2 {
 			return fmt.Errorf("用法：wtable %s <pane>", args[0])
 		}
-		// An ACP restart may spend up to 30s in initialize/session-load.
 		paneCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 		var out any
@@ -361,7 +360,7 @@ func run(args []string) error {
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		fs.BoolVar(&jsonMode, "json", false, "输出 JSON")
 		key := fs.String("key", "", "任务去重键")
-		delivery := fs.String("delivery", "", "push、steer、prompt 或 pull（省略时按目标能力选择）")
+		delivery := fs.String("delivery", "", "push、steer 或 pull（省略时按目标能力选择）")
 		kind := fs.String("kind", "", "chat、delegation 或 handoff（默认 delegation）")
 		queue := fs.Bool("queue", false, "目标忙时显式排队")
 		steer := fs.Bool("steer", false, "作为当前 turn 的追加要求插入（需目标声明支持且正在执行）")
@@ -1007,8 +1006,8 @@ const help = `wtable 0.5.0 — macOS 终端 Agent 工作台
                                           TUI 内 Ctrl-a w 可随时切换工作区
   wtable new [name] [--dir PATH] [--workspace PATH] [--kind foreground|worker] -- CMD...  新建真实终端
   wtable recruit [NAME] [OPTIONS] [-- CMD...]
-    --preset ID --backend pty|acp --dir PATH --layer NAME|PATH --workspace PATH
-    --kind foreground|worker  前台只能是 PTY；ACP 只能创建为 worker
+    --preset ID --backend pty --dir PATH --layer NAME|PATH --workspace PATH
+    --kind foreground|worker  仅支持 PTY；省略时自动选择前台或 worker
     --role TEXT --account NAME --brief --connect TARGET
     --connect 可重复或用逗号分隔；方向为新 pane → TARGET
     layer 重名时使用路径；与 --dir 同时使用时目录必须位于该层内
@@ -1034,7 +1033,7 @@ const help = `wtable 0.5.0 — macOS 终端 Agent 工作台
   wtable peers                            查看当前身份可访问的接收者
   wtable send [OPTIONS] PANE PROMPT        投递任务，打印 task ID
   wtable ask [OPTIONS] PANE PROMPT         投递并等待（--timeout 默认 10m）
-    --key KEY --delivery push|steer|prompt|pull --queue --steer
+    --key KEY --delivery push|steer|pull --queue --steer
     --on-complete none|notify|handoff --report-to PANE --parent TASK
   wtable next [--timeout 30s]               pane 内领取任务，输出任务 ID 与内容（--json 输出完整记录）
   wtable ack TASK                         接收 pane 确认已接手
@@ -1067,8 +1066,8 @@ Git 与运维：
 设置 WTABLE_HOME 可使用独立状态目录。默认使用 macOS Application Support/wtable。
 new/recruit 均接受预设、角色、账号、brief 与连线选项；--brief 默认关闭。
 new/recruit 可配置 --blocked-regex REGEX --tail-lines N --settle 400ms --verify 3s --ack-timeout 90s。
-省略送达方式时按目标能力选择：ACP 使用 prompt，PTY 使用 push；pull 仅用于已声明支持领取的目标。
-PTY push 收到任务后调用 ack/result；pull 使用 next/result；ACP turn 结束自动完成。
+省略送达方式时按目标能力选择；PTY 使用 push，pull 仅用于已声明支持领取的目标。
+PTY push 收到任务后调用 ack/result；pull 使用 next/result。
 notify 只生成报告；handoff 才派新任务。unknown 表示缺少接手证据，不自动重试。
 Ctrl-a ? 查看 TUI 快捷键。不支持远程、历史 reflow 或鼠标选区。账号仅使用已有本地配置，不自动安装或登录。
 `

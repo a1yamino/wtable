@@ -22,7 +22,7 @@ func (u *ui) startRoleForm(existing *model.RoleTemplate) {
 	}
 	p.form = "role"
 	p.field = 0
-	p.fields = []panelField{textField("name", "模板名称", r.Name), textField("instructions", "角色指令（Alt-Enter 换行）", r.Instructions), textField("preset", "默认 preset（可空）", r.Preset), optionField("backend", "默认后端", r.Backend, []panelOption{{"", "跟随 preset"}, {"pty", "PTY"}, {"acp", "ACP"}}), textField("cwd", "约定目录（可空）", r.Cwd)}
+	p.fields = []panelField{textField("name", "模板名称", r.Name), textField("instructions", "角色指令（Alt-Enter 换行）", r.Instructions), textField("preset", "默认 preset（可空）", r.Preset), optionField("backend", "默认后端（PTY-only）", r.Backend, []panelOption{{"", "跟随 PTY preset"}, {"pty", "PTY"}}), textField("cwd", "约定目录（可空）", r.Cwd)}
 }
 func (u *ui) rolePanelKey(e *tcell.EventKey) {
 	p := u.panel

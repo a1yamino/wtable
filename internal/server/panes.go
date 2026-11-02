@@ -68,7 +68,14 @@ func (s *Server) hasForegroundLocked(workspace, except string) bool {
 	return false
 }
 
+const acpDisabledError = "ACP 已停用，请使用 PTY"
+
 func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, error) {
+	// Reject before resolving roles, layers, accounts, secrets, or writing any
+	// state. Restart/copy callers pass the persisted backend through this path.
+	if args.Backend == "acp" {
+		return model.Pane{}, errors.New(acpDisabledError)
+	}
 	var role model.RoleTemplate
 	var snapshotHash string
 	if restartID == "" {
@@ -79,6 +86,9 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 		}
 		if args.RoleTemplate != "" {
 			snapshotHash = roleHash(role.Instructions)
+		}
+		if args.Backend == "acp" {
+			return model.Pane{}, errors.New(acpDisabledError)
 		}
 		if err := s.resolvePreset(&args); err != nil {
 			return model.Pane{}, err
@@ -126,8 +136,11 @@ func (s *Server) spawn(args model.SpawnParams, restartID string) (model.Pane, er
 	if args.Backend == "" {
 		args.Backend = "pty"
 	}
-	if args.Backend != "pty" && args.Backend != "acp" {
-		return model.Pane{}, errors.New("backend 必须为 pty 或 acp")
+	if args.Backend == "acp" {
+		return model.Pane{}, errors.New(acpDisabledError)
+	}
+	if args.Backend != "pty" {
+		return model.Pane{}, errors.New("backend 必须为 pty")
 	}
 	// The foreground is the one agent a human talks to. It is always a PTY;
 	// ACP has no terminal surface and exists only as a worker backend.

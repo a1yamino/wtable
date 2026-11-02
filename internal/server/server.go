@@ -336,6 +336,9 @@ func (s *Server) saveLocked() error {
 	// A full successful save makes the durable copy match memory again, so a
 	// transient error no longer needs to keep the daemon in fail-closed mode.
 	s.storeErr = nil
+	// Every task terminal/unknown transition funnels through this durable
+	// commit point; individual mutation paths must not maintain partial wakeups.
+	s.notifyFinishedTaskWaitersLocked()
 	// The same save also persisted whatever chat was dirty at marshal time.
 	s.chatDirty = false
 	s.chatSavedAt = time.Now()

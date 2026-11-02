@@ -16,8 +16,8 @@ type createView struct {
 	reason  string
 }
 
-// openCreate is the one-step creation flow. Foreground lists PTY presets only;
-// worker may list ACP as well. Defaults are prefilled so Enter is enough.
+// openCreate is the one-step PTY-only creation flow. Defaults are prefilled
+// so Enter is enough.
 func (u *ui) openCreate(kind string) {
 	if kind == model.PaneForeground {
 		if p := u.foregroundPane(); p != nil {
@@ -232,9 +232,9 @@ func (u *ui) drawCreate() {
 	}
 	lines := []string{title}
 	if c.mode == model.PaneForeground {
-		lines = append(lines, "前台使用 PTY 预设；想用 ACP 请新建 worker")
+		lines = append(lines, "前台仅支持 PTY 预设")
 	} else {
-		lines = append(lines, "worker 支持 PTY 和 ACP，会出现在左栏")
+		lines = append(lines, "worker 仅支持 PTY，会出现在左栏")
 	}
 	lines = append(lines, "")
 	index := 0

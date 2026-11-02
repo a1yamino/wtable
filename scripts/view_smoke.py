@@ -215,61 +215,38 @@ def run(args):
         rpc.call("pane.remove", {"id": shell["id"]})
         wait_until(lambda: all(p["id"] != shell["id"] for p in state()["panes"]), "utility shell removed")
 
-        # API validation: foreground is PTY-only and unique; catalog filters.
-        assert all(p["backend"] == "pty" for p in rpc.call("preset.list", {"kind": "foreground"})["presets"])
-        try:
-            rpc.call("pane.spawn", {"name": "bad-acp", "kind": "foreground", "backend": "acp", "cwd": str(root),
-                                    "command": [sys.executable, str(script_dir / "fixtures/acp_agent.py"), "--root", str(root)]})
-            raise AssertionError("foreground ACP was accepted")
-        except Exception as exc:
-            assert "前台" in str(exc), str(exc)
+        # API validation: ACP is hidden and rejected for every pane kind.
+        for kind in ("foreground", "worker"):
+            catalog = rpc.call("preset.list", {"kind": kind})["presets"]
+            assert all(p["backend"] == "pty" for p in catalog)
+            assert not any(p["id"] == "acp-fixture" for p in catalog)
+        for params in [
+            {"name": "bad-acp", "kind": "worker", "backend": "acp", "cwd": str(root),
+             "command": [sys.executable, str(script_dir / "fixtures/acp_agent.py"), "--root", str(root)]},
+            {"name": "bad-acp-preset", "kind": "worker", "preset": "acp-fixture", "cwd": str(root)},
+        ]:
+            try:
+                rpc.call("pane.spawn", params)
+                raise AssertionError("ACP spawn was accepted")
+            except Exception as exc:
+                assert "ACP 已停用" in str(exc), str(exc)
         try:
             rpc.call("pane.spawn", {"name": "second-foreground", "kind": "foreground", "backend": "pty", "cwd": str(root), "command": ["/bin/cat"]})
             raise AssertionError("second foreground was accepted")
         except Exception as exc:
             assert "前台" in str(exc), str(exc)
-        record("api_rejects_acp_foreground_and_a_second_foreground_and_filters_presets")
-
-        # Approval is non-blocking: typing in another pane continues, and
-        # Escape on the focused card does not reject.
-        acp = rpc.call("pane.spawn", {"name": "acp", "kind": "worker", "preset": "acp-fixture", "cwd": str(root)})
-        wait_until(lambda: pane_by_id(acp["id"])["state"] == "running", "ACP running")
-        prefix("a"); send(b"\x1b[F"); send(b"\r")
-        wait_until(lambda: state()["last_focus"] == acp["id"], "ACP selected")
-        visible(acp["id"])
-        effect = root / "permission-effect.txt"
-        approval_task = rpc.call("task.send", {"to": acp["id"], "prompt": "permission:" + str(effect)})
-        wait_until(lambda: state()["permissions"], "permission request")
-        wait_until(lambda: shown("请求批准"), "approval card visible")
-        prefix("2"); visible(ids["B"])
-        send("NONBLOCK\r")
-        wait_until(lambda: "NONBLOCK" in pane_text(ids["B"]), "input continues in another pane")
-        assert state()["permissions"] and not effect.exists()
-        send(b"\x1b")  # unfocused Esc must never answer the request
-        time.sleep(.2)
-        assert state()["permissions"] and not effect.exists()
-        prefix("p")
-        wait_until(lambda: shown("1..9 选择"), "approval card focused")
-        send(b"\x1b")
-        time.sleep(.2)
-        assert state()["permissions"] and not effect.exists(), "Esc must only collapse the card"
-        prefix("p"); send("1")  # fixture: option 1 is reject
-        wait_until(lambda: not state()["permissions"], "permission rejected")
-        assert not effect.exists()
-        wait_until(lambda: rpc.call("task.get", {"id": approval_task["id"]})["state"] == "completed", "rejected turn completed")
-        screenshot("approval")
-        record("approval_never_takes_keys_and_escape_collapses_instead_of_rejecting")
+        record("api_rejects_direct_and_preset_acp_and_a_second_foreground_and_filters_presets")
 
         # Inbox: a completed task from the human appears once and disappears
         # when the target pane is opened.
         done = rpc.call("task.send", {"to": ids["A"], "prompt": "VIEW_INBOX"})
         wait_until(lambda: rpc.call("task.get", {"id": done["id"]})["state"] in ("queued", "delivered", "accepted"), "task queued")
         rpc.call("task.done", {"id": done["id"], "result": "INBOX_RESULT"})
-        wait_until(lambda: any(i.get("task_id") == done["id"] for i in state()["inbox"]), "task inbox item")
+        wait_until(lambda: any(i.get("task_id") == done["id"] for i in state().get("inbox", [])), "task inbox item")
         assert not rpc.call("task.get", {"id": done["id"]})["seen"]
         prefix("1"); visible(ids["A"])
         wait_until(lambda: rpc.call("task.get", {"id": done["id"]})["seen"], "task marked seen on open")
-        wait_until(lambda: not any(i.get("task_id") == done["id"] for i in state()["inbox"]), "inbox item cleared on open")
+        wait_until(lambda: not any(i.get("task_id") == done["id"] for i in state().get("inbox", [])), "inbox item cleared on open")
         record("inbox_lists_completed_human_work_and_clears_only_when_the_pane_is_opened")
 
         # Narrow terminals compress the rail to a glyph strip; Ctrl-a a expands
@@ -290,7 +267,6 @@ def run(args):
         assert all("frame" not in pane for pane in blank["panes"]), "ids [] must mean metadata only"
         all_frames = state(frames=True)
         assert all("frame" in pane for pane in all_frames["panes"] if pane["backend"] == "pty"), "omitted ids must retain all PTY frames"
-        assert all("frame" not in pane for pane in all_frames["panes"] if pane["backend"] == "acp"), "ACP has no terminal frame"
         record("state_get_ids_contract_is_unchanged")
 
         save("requests.json", json.dumps(requests, ensure_ascii=False, indent=2) + "\n")

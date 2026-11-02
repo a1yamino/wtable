@@ -1,61 +1,75 @@
 package server
 
 import (
+	"strings"
 	"time"
 
 	"wtable/internal/model"
 )
 
-// notifyNextWaiter wakes the (single) blocked next_task caller for this pane.
-// The channel is buffered so a wake that races with registration is not lost.
+func nextWaiterKey(paneID, runID string) string { return paneID + "\x00" + runID }
+
+// notifyNextWaiter wakes every run's blocked next caller for this pane. Old
+// runs then fail their generation check; only the current run may claim.
 func (s *Server) notifyNextWaiter(paneID string) {
 	s.mu.Lock()
-	ch := s.nextWaiters[paneID]
-	s.mu.Unlock()
-	if ch == nil {
-		return
+	channels := []chan struct{}{}
+	prefix := paneID + "\x00"
+	for key, ch := range s.nextWaiters {
+		if strings.HasPrefix(key, prefix) {
+			channels = append(channels, ch)
+		}
 	}
-	select {
-	case ch <- struct{}{}:
-	default:
+	s.mu.Unlock()
+	for _, ch := range channels {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
 }
 
-// registerNextWaiter installs one waiter per pane. A second concurrent next
-// call is rejected by nextTask, so a plain slot is enough.
-func (s *Server) registerNextWaiter(paneID string) (chan struct{}, bool) {
+// registerNextWaiter installs one waiter per pane and run. A replaced run can
+// finish without preventing the newly authenticated instance from polling.
+func (s *Server) registerNextWaiter(paneID, runID string) (chan struct{}, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.nextWaiters == nil {
 		s.nextWaiters = map[string]chan struct{}{}
 	}
-	if _, busy := s.nextWaiters[paneID]; busy {
+	key := nextWaiterKey(paneID, runID)
+	if _, busy := s.nextWaiters[key]; busy {
 		return nil, false
 	}
 	ch := make(chan struct{}, 1)
-	s.nextWaiters[paneID] = ch
+	s.nextWaiters[key] = ch
 	return ch, true
 }
 
-func (s *Server) clearNextWaiter(paneID string, ch chan struct{}) {
+func (s *Server) clearNextWaiter(paneID, runID string, ch chan struct{}) {
 	s.mu.Lock()
-	if s.nextWaiters[paneID] == ch {
-		delete(s.nextWaiters, paneID)
+	key := nextWaiterKey(paneID, runID)
+	if s.nextWaiters[key] == ch {
+		delete(s.nextWaiters, key)
 	}
 	s.mu.Unlock()
 }
 
-// notifyTaskWaiter wakes a blocked task.wait for this task id.
-func (s *Server) notifyTaskWaiter(taskID string) {
-	s.mu.Lock()
-	ch := s.taskWaiters[taskID]
-	s.mu.Unlock()
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- struct{}{}:
-	default:
+// notifyFinishedTaskWaitersLocked is called by every successful state Save.
+// Looking at committed task states here, rather than notifying at individual
+// mutation sites, covers ACK timeouts, process/pane lifecycle events, delivery
+// failures and late ACP outcomes through one path. The caller holds s.mu.
+func (s *Server) notifyFinishedTaskWaitersLocked() {
+	for key, ch := range s.taskWaiters {
+		taskID, _, _ := strings.Cut(key, "\x00")
+		t := s.taskLocked(taskID)
+		if t == nil || !finished(t.State) {
+			continue
+		}
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
 }
 

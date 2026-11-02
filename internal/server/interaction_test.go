@@ -8,6 +8,7 @@ import (
 
 	"wtable/internal/model"
 	"wtable/internal/store"
+	"wtable/internal/terminal"
 )
 
 func TestMigratePaneKindsRunsOnce(t *testing.T) {
@@ -68,7 +69,7 @@ func TestDeriveInboxOrdersBlockingOldestFirstThenNewestInfo(t *testing.T) {
 func TestSpawnValidatesForegroundKinds(t *testing.T) {
 	s := onboardingServer(t)
 	cwd := s.paths.Home
-	if _, err := s.spawn(model.SpawnParams{Name: "fg-acp", Kind: model.PaneForeground, Backend: "acp", Cwd: cwd, Command: []string{"/bin/cat"}}, ""); err == nil || !strings.Contains(err.Error(), "前台") {
+	if _, err := s.spawn(model.SpawnParams{Name: "fg-acp", Kind: model.PaneForeground, Backend: "acp", Cwd: cwd, Command: []string{"/bin/cat"}}, ""); err == nil || err.Error() != acpDisabledError {
 		t.Fatalf("foreground ACP accepted: %v", err)
 	}
 	first, err := s.spawn(model.SpawnParams{Name: "fg", Kind: model.PaneForeground, Backend: "pty", Cwd: cwd, Command: []string{"/bin/cat"}}, "")
@@ -145,6 +146,11 @@ func TestInterruptSendValidatesBeforeCancelling(t *testing.T) {
 	cancelled := false
 	s.taskCancels["old"] = func() { cancelled = true }
 	s.state.Tasks = []model.Task{{ID: "old", From: "controller", To: "p", Prompt: "work", State: "delivered", DeliveryMode: "push", CreatedAt: time.Now()}}
+	term, err := terminal.Start(s.ctx, terminal.Config{Command: []string{"/bin/cat"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.terminals["p"] = term
 
 	tooBig := strings.Repeat("x", (1<<20)+1)
 	if _, err := s.interruptSend("controller", rawTask(map[string]any{"to": "p", "prompt": tooBig})); err == nil {
@@ -164,8 +170,8 @@ func TestInterruptSendValidatesBeforeCancelling(t *testing.T) {
 	s.mu.Lock()
 	old := *s.taskLocked("old")
 	s.mu.Unlock()
-	if old.State != "cancelled" || !strings.Contains(old.Result, "中断") || !cancelled {
-		t.Fatalf("old task was not interrupted: %+v cancelled=%t", old, cancelled)
+	if old.State != "cancelling" || !strings.Contains(old.Result, "人工确认") || cancelled {
+		t.Fatalf("PTY interrupt bypassed stop confirmation: %+v cancelled=%t", old, cancelled)
 	}
 	if task.Kind != "chat" || task.State != "queued" {
 		t.Fatalf("new message not queued as chat: %+v", task)

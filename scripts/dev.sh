@@ -34,7 +34,6 @@ usage() {
   add fg   [NAME] [--brief] [recruit 参数...]   新建 PTY 前台
   add pty  [NAME] [--brief] [recruit 参数...]   新建 PTY worker（回显输入）
   add auto [NAME] [--brief] [recruit 参数...]   新建自动 ack/result 的 PTY worker
-  add acp  [NAME] [--brief] [recruit 参数...]   新建 ACP worker（回合结束自动完成）
   add shell [NAME]                              新建 shell worker
   kill NAME_OR_ID      移除一个 pane（进程随之停止）
   clean                移除所有 dev-* 名称或 dev-* 预设的 pane，保留 daemon
@@ -49,7 +48,6 @@ usage() {
   scripts/dev.sh reset --real --attach
   scripts/dev.sh up --attach
   scripts/dev.sh add fg --brief
-  scripts/dev.sh add acp worker1 --brief
   scripts/dev.sh kill worker1
   scripts/dev.sh clean
   scripts/dev.sh down
@@ -97,8 +95,6 @@ data = [
      "command": [python, "-u", fixtures + "/pty_echo.py", "--root", run, "--mode", "echo"]},
     {"id": "dev-pty-auto", "name": "Dev auto (PTY)", "backend": "pty",
      "command": [python, "-u", fixtures + "/pty_echo.py", "--root", run, "--mode", "auto"]},
-    {"id": "dev-acp", "name": "Dev ACP worker", "backend": "acp",
-     "command": [python, "-u", fixtures + "/acp_agent.py", "--root", run]},
 ]
 if mode == "real":
     # Built-in real presets (codex-pty, claude-pty, agy-pty) need no entry.
@@ -172,9 +168,8 @@ cmd_add() {
     fg)    wt recruit "$name" --preset dev-pty --kind foreground "$@" ;;
     pty)   wt recruit "$name" --preset dev-pty --kind worker "$@" ;;
     auto)  wt recruit "$name" --preset dev-pty-auto --kind worker "$@" ;;
-    acp)   wt recruit "$name" --preset dev-acp --kind worker "$@" ;;
     shell) wt new "$name" --kind worker "$@" ;;
-    *)     die "add: 未知类型 $kind（fg/pty/auto/acp/shell）" ;;
+    *)     die "add: 未知类型 $kind（fg/pty/auto/shell）" ;;
   esac
 }
 
