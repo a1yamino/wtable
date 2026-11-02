@@ -18,3 +18,83 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./internal/...
+      - name: Notify Telegram
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOB_STATUS: ${{ job.status }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import html
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          if not token or not chat_id:
+              print("::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured")
+              sys.exit(0)
+
+          status = os.environ["JOB_STATUS"]
+          presentations = {
+              "success": ("✅", "CI 已通过", "代码检查与测试全部通过"),
+              "failure": ("❌", "CI 未通过", "请打开运行记录查看失败详情"),
+              "cancelled": ("⚪", "CI 已取消", "本次运行未完成"),
+              "timed_out": ("⏱️", "CI 超时", "请检查耗时较长的步骤"),
+              "action_required": ("⚠️", "CI 需要处理", "请在 GitHub 中查看运行状态"),
+          }
+          icon, title, summary = presentations.get(
+              status, ("ℹ️", "CI 状态更新", f"当前状态：{status}")
+          )
+
+          def value(name):
+              return html.escape(os.environ.get(name, ""), quote=True)
+
+          commit = value("COMMIT_SHA")[:7]
+          message = "\n".join(
+              [
+                  f"<b>{icon} wtable · {html.escape(title)}</b>",
+                  f"<blockquote>{html.escape(summary)}</blockquote>",
+                  "<b>运行信息</b>",
+                  f"├ 状态　<b>{html.escape(status)}</b>",
+                  f"├ 分支　<code>{value('BRANCH')}</code>",
+                  f"├ 提交　<code>{commit}</code>",
+                  f"├ 事件　{value('EVENT_NAME')} · {value('ACTOR')}",
+                  f"└ 仓库　<code>{value('REPOSITORY')}</code>",
+                  "",
+                  f'<a href="{value("RUN_URL")}">查看 GitHub Actions 运行记录 →</a>',
+              ]
+          )
+          payload = json.dumps(
+              {
+                  "chat_id": chat_id,
+                  "text": message,
+                  "parse_mode": "HTML",
+                  "disable_web_page_preview": True,
+              }
+          ).encode()
+          request = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  response.read()
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", errors="replace")
+              print(f"::warning::Telegram notification failed: {detail}")
+          except urllib.error.URLError as exc:
+              print(f"::warning::Telegram notification failed: {exc.reason}")
+          PY

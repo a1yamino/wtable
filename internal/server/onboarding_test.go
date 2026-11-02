@@ -97,7 +97,7 @@ func TestACPLaunchEntrypointsFailWithoutSideEffects(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.paths.Home, "roles", "legacy.md"), []byte(legacyRole), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s.state.Panes = []model.Pane{{ID: "legacy-pane", Name: "legacy-pane", Kind: model.PaneWorker, Backend: "acp", Command: command, Cwd: s.paths.Home, Workspace: s.paths.Home, State: "exited", CreatedAt: time.Now().Round(0)}}
+	s.state.Panes = []model.Pane{{ID: "legacy-pane", Name: "legacy-pane", Kind: model.PaneWorker, Backend: "acp", Command: command, Cwd: s.paths.Home, Workspace: s.paths.Home, State: "exited", CreatedAt: time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)}}
 	s.mu.Lock()
 	if err := s.saveLocked(); err != nil {
 		s.mu.Unlock()
