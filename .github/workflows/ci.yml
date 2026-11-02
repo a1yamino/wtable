@@ -64,6 +64,7 @@ jobs:
           go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Build macOS application
+        working-directory: desktop
         run: wails build -clean -v 1
       - name: Check desktop Go code
         run: |
