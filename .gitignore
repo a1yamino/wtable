@@ -6,8 +6,13 @@
 !/Makefile
 !/README.md
 !/README.zh-CN.md
+!/AGENTS.md
+!/CLAUDE.md
 !/go.mod
 !/go.sum
+!/.github/
+!/.github/workflows/
+!/.github/workflows/*.yml
 
 # Go source (including *_test.go); generated binaries remain ignored.
 !/cmd/
