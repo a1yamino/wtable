@@ -7,9 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -18,6 +16,7 @@ import (
 	"time"
 
 	"wtable/internal/config"
+	"wtable/internal/daemon"
 	"wtable/internal/model"
 	"wtable/internal/rpc"
 	"wtable/internal/server"
@@ -59,7 +58,7 @@ func run(args []string) error {
 				return errors.New("daemon 未运行")
 			}
 		}
-		if err = ensureDaemon(ctx, paths); err != nil {
+		if err = daemon.Ensure(ctx, paths); err != nil {
 			return err
 		}
 	}
@@ -914,46 +913,6 @@ func stateParams(workspace string) map[string]any {
 		params["workspace"] = workspace
 	}
 	return params
-}
-
-func ensureDaemon(ctx context.Context, p config.Paths) error {
-	probe, err := net.DialTimeout("unix", p.Socket, 200*time.Millisecond)
-	if err == nil {
-		probe.Close()
-		return nil
-	}
-	if err = p.Prepare(); err != nil {
-		return err
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	logFile, err := os.OpenFile(p.Log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return err
-	}
-	defer logFile.Close()
-	cmd := exec.Command(exe, "daemon")
-	cmd.Stdin = nil
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err = cmd.Start(); err != nil {
-		return err
-	}
-	go cmd.Wait()
-	for i := 0; i < 50; i++ {
-		conn, err := net.DialTimeout("unix", p.Socket, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		if err = pause(ctx, 100*time.Millisecond); err != nil {
-			return err
-		}
-	}
-	return fmt.Errorf("daemon 启动失败，请查看 %s", p.Log)
 }
 
 func waitTask(ctx context.Context, c *rpc.Client, id string, timeout time.Duration) (model.Task, error) {

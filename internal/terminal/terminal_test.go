@@ -56,6 +56,19 @@ exit 37`
 		}
 	}
 	f := await(func(f model.Frame) bool { return f.BracketedPaste && strings.Contains(frameText(f), "中é🙂") })
+	var raw strings.Builder
+	cursor := uint64(0)
+	for !strings.Contains(raw.String(), "\033[6n") {
+		out, err := term.WaitRawOutput(ctx, cursor, 64)
+		if err != nil {
+			t.Fatalf("waiting for raw output: %v", err)
+		}
+		raw.Write(out.Data)
+		cursor = out.Cursor
+	}
+	if cursor == 0 || !strings.Contains(raw.String(), "\033[38;2;12;34;56m") {
+		t.Fatalf("raw output cursor or bytes are incomplete: %q", raw.String())
+	}
 	if f.Cells[0][0].Width != 2 || f.Cells[0][1].Width != 0 || f.Cells[0][2].Width != 1 || f.Cells[0][3].Width != 2 {
 		t.Fatalf("wrong grapheme widths: %+v", f.Cells[0][:5])
 	}

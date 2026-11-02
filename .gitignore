@@ -35,6 +35,18 @@
 !/internal/terminal/*.go
 !/internal/tui/
 !/internal/tui/*.go
+!/internal/daemon/
+!/internal/daemon/*.go
+
+# Wails desktop prototype.
+!/desktop/
+!/desktop/**
+/desktop/frontend/node_modules/
+/desktop/frontend/wailsjs/
+/desktop/frontend/package.json.md5
+/desktop/frontend/dist/*
+!/desktop/frontend/dist/.gitkeep
+/desktop/build/bin/
 
 # Maintained scripts.
 !/scripts/

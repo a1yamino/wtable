@@ -838,6 +838,48 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 			return nil, errors.New("没有可读取的终端画面")
 		}
 		return t.Snapshot(max(0, min(10000, a.Offset))), nil
+	case "pane.output":
+		var a struct {
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
+			Cursor    uint64 `json:"cursor"`
+			MaxBytes  int    `json:"max_bytes"`
+			WaitMS    int    `json:"wait_ms"`
+		}
+		if err := decode(raw, &a); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		p, err := s.resolvePaneLocked(a.Workspace, a.ID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		t := s.terminals[p.ID]
+		s.mu.Unlock()
+		if t == nil {
+			return nil, errors.New("pane 没有运行中的 PTY")
+		}
+		wait := time.Duration(max(0, min(a.WaitMS, 1000))) * time.Millisecond
+		var out terminal.Output
+		if wait > 0 {
+			ctx, cancel := context.WithTimeout(s.ctx, wait)
+			out, err = t.WaitRawOutput(ctx, a.Cursor, a.MaxBytes)
+			cancel()
+			if errors.Is(err, context.DeadlineExceeded) {
+				out = t.RawOutput(a.Cursor, a.MaxBytes)
+				err = nil
+			}
+		} else {
+			out = t.RawOutput(a.Cursor, a.MaxBytes)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return struct {
+			Data   []byte `json:"data"`
+			Cursor uint64 `json:"cursor"`
+		}{Data: out.Data, Cursor: out.Cursor}, nil
 	case "edge.add", "edge.remove":
 		return s.edge(method, raw)
 	case "peer.list":

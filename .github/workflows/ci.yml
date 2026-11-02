@@ -4,27 +4,95 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
       - name: Check formatting
-        run: test -z "$(gofmt -l .)"
+        run: test -z "$(git ls-files '*.go' | xargs gofmt -l)"
       - name: Vet
-        run: go vet ./...
+        run: go vet ./cmd/... ./internal/...
       - name: Test
-        run: go test -race ./internal/...
+        run: go test -race ./cmd/... ./internal/...
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - name: Install
+        working-directory: desktop/frontend
+        run: npm ci
+      - name: Build
+        working-directory: desktop/frontend
+        run: npm run build
+
+  desktop:
+    runs-on: macos-14
+    env:
+      CGO_ENABLED: "1"
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      CGO_CFLAGS: "-mmacosx-version-min=13.0"
+      CGO_CXXFLAGS: "-mmacosx-version-min=13.0"
+      CGO_LDFLAGS: "-mmacosx-version-min=13.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - name: Install Wails
+        run: |
+          WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
+          go install "github.com/wailsapp/wails/v2/cmd/wails@$WAILS_VERSION"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install frontend dependencies
+        working-directory: desktop/frontend
+        run: npm ci
+      - name: Check desktop Go code
+        run: |
+          go vet ./...
+          go vet -tags 'desktop,production' ./desktop
+          go test -tags 'desktop,production' ./desktop
+      - name: Build macOS application
+        run: wails build -clean -v 1
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: wtable-desktop-macos
+          path: desktop/build/bin/wtable.app
+          if-no-files-found: error
+
+  notify:
+    if: always()
+    needs: [backend, frontend, desktop]
+    runs-on: ubuntu-latest
+    steps:
       - name: Notify Telegram
-        if: always()
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          JOB_STATUS: ${{ job.status }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          DESKTOP_RESULT: ${{ needs.desktop.result }}
           REPOSITORY: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
@@ -46,13 +114,22 @@ jobs:
               print("::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured")
               sys.exit(0)
 
-          status = os.environ["JOB_STATUS"]
+          results = {
+              "backend": os.environ.get("BACKEND_RESULT", "unknown"),
+              "frontend": os.environ.get("FRONTEND_RESULT", "unknown"),
+              "desktop": os.environ.get("DESKTOP_RESULT", "unknown"),
+          }
+          if any(result == "cancelled" for result in results.values()):
+              status = "cancelled"
+          elif all(result == "success" for result in results.values()):
+              status = "success"
+          else:
+              status = "failure"
+
           presentations = {
-              "success": ("✅", "CI 已通过", "代码检查与测试全部通过"),
+              "success": ("✅", "CI 已通过", "后端、前端与 macOS 桌面构建全部通过"),
               "failure": ("❌", "CI 未通过", "请打开运行记录查看失败详情"),
               "cancelled": ("⚪", "CI 已取消", "本次运行未完成"),
-              "timed_out": ("⏱️", "CI 超时", "请检查耗时较长的步骤"),
-              "action_required": ("⚠️", "CI 需要处理", "请在 GitHub 中查看运行状态"),
           }
           icon, title, summary = presentations.get(
               status, ("ℹ️", "CI 状态更新", f"当前状态：{status}")
@@ -68,6 +145,9 @@ jobs:
                   f"<blockquote>{html.escape(summary)}</blockquote>",
                   "<b>运行信息</b>",
                   f"├ 状态　<b>{html.escape(status)}</b>",
+                  f"├ 后端　<code>{html.escape(results['backend'])}</code>",
+                  f"├ 前端　<code>{html.escape(results['frontend'])}</code>",
+                  f"├ 桌面　<code>{html.escape(results['desktop'])}</code>",
                   f"├ 分支　<code>{value('BRANCH')}</code>",
                   f"├ 提交　<code>{commit}</code>",
                   f"├ 事件　{value('EVENT_NAME')} · {value('ACTOR')}",

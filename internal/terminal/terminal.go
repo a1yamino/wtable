@@ -23,7 +23,18 @@ import (
 	"wtable/internal/model"
 )
 
-const historyLimit = 10000
+const (
+	historyLimit     = 10000
+	outputRingLimit  = 4 << 20
+	outputChunkLimit = 256 << 10
+)
+
+// Output is a detached slice of raw PTY bytes and the absolute cursor that
+// follows it. Cursors are byte offsets, not indexes into the retained ring.
+type Output struct {
+	Data   []byte
+	Cursor uint64
+}
 
 type Config struct {
 	Command  []string
@@ -51,6 +62,11 @@ type Terminal struct {
 	cmd          *exec.Cmd
 	cfg          Config
 	inputMu      sync.Mutex
+	outputMu     sync.Mutex
+	output       []byte
+	outputStart  uint64
+	outputNext   uint64
+	outputReady  chan struct{}
 	stopOnce     sync.Once
 	stopped      chan struct{}
 	finished     chan struct{}
@@ -103,7 +119,7 @@ func Start(ctx context.Context, cfg Config) (*Terminal, error) {
 		lastOutput: time.Now(), vt: vt.NewEmulator(cfg.Cols, cfg.Rows), modes: make(map[ansi.Mode]bool),
 		pty: f, cmd: cmd, cfg: cfg, stopped: make(chan struct{}),
 		finished: make(chan struct{}), readDone: make(chan struct{}),
-		replies: make(chan []byte, 128),
+		replies: make(chan []byte, 128), outputReady: make(chan struct{}, 1),
 	}
 	t.vt.SetScrollbackSize(historyLimit)
 	// Mode callbacks run synchronously within Write, under t.mu.
@@ -170,6 +186,49 @@ func (t *Terminal) Input(data []byte) error {
 		data = data[n:]
 	}
 	return nil
+}
+
+// RawOutput returns up to max bytes from the retained raw PTY stream. A cursor
+// before the retained window is moved forward; a cursor after it is treated as
+// stale, which happens when a pane is restarted and keeps its pane ID.
+func (t *Terminal) RawOutput(cursor uint64, maxBytes int) Output {
+	if maxBytes <= 0 {
+		maxBytes = 64 << 10
+	}
+	maxBytes = min(maxBytes, outputChunkLimit)
+
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+	if cursor < t.outputStart || cursor > t.outputNext {
+		cursor = t.outputStart
+	}
+	if cursor == t.outputNext || len(t.output) == 0 {
+		return Output{Cursor: t.outputNext}
+	}
+	offset := int(cursor - t.outputStart)
+	end := min(len(t.output), offset+maxBytes)
+	return Output{
+		Data:   append([]byte(nil), t.output[offset:end]...),
+		Cursor: cursor + uint64(end-offset),
+	}
+}
+
+// WaitRawOutput blocks until output is available, the terminal closes, or ctx
+// expires. A one-slot wake channel coalesces bursts without dropping bytes.
+func (t *Terminal) WaitRawOutput(ctx context.Context, cursor uint64, maxBytes int) (Output, error) {
+	for {
+		out := t.RawOutput(cursor, maxBytes)
+		if len(out.Data) > 0 {
+			return out, nil
+		}
+		select {
+		case <-ctx.Done():
+			return out, ctx.Err()
+		case <-t.outputReady:
+		case <-t.stopped:
+			return Output{}, os.ErrClosed
+		}
+	}
 }
 
 func (t *Terminal) Resize(cols, rows int) error {
@@ -300,6 +359,7 @@ func (t *Terminal) readOutput() {
 	for {
 		n, err := t.pty.Read(buf)
 		if n > 0 {
+			t.retainOutput(buf[:n])
 			t.mu.Lock()
 			_, vtErr := t.vt.Write(buf[:n])
 			t.lastOutput = time.Now()
@@ -318,6 +378,25 @@ func (t *Terminal) readOutput() {
 			}
 			return
 		}
+	}
+}
+
+func (t *Terminal) retainOutput(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	t.outputMu.Lock()
+	t.output = append(t.output, data...)
+	t.outputNext += uint64(len(data))
+	if excess := len(t.output) - outputRingLimit; excess > 0 {
+		copy(t.output, t.output[excess:])
+		t.output = t.output[:len(t.output)-excess]
+	}
+	t.outputStart = t.outputNext - uint64(len(t.output))
+	t.outputMu.Unlock()
+	select {
+	case t.outputReady <- struct{}{}:
+	default:
 	}
 }
 
