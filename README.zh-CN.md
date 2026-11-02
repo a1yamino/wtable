@@ -4,7 +4,9 @@
 
 macOS 上的终端多 Agent 工作台。使用 Go、自有 pane 和真实 PTY，不依赖 tmux 或 zellij。
 
-当前为 MVP：可以同时运行终端 CLI，通过 ACP 接入结构化会话，用显式授权边投递任务，并通过 Git worktree 隔离工作目录。
+当前为 MVP：可以通过 PTY 同时运行终端 CLI，用显式授权边投递任务，并通过 Git worktree 隔离工作目录。
+
+> **当前状态：仅支持 PTY。** ACP 适配代码仍保留在仓库中，供后续恢复使用，但 ACP pane 的创建和重启入口目前停用。已有 ACP pane 及其历史记录仍可查看，旧 pane 也可移除；所有新工作均使用 PTY。
 
 ## 启动
 
@@ -55,17 +57,7 @@ wtable list
 
 `--` 后的命令原样执行，不经过工作台的 shell 字符串解析。普通 CLI 使用 PTY 后端，显示它真实的终端界面。工作台不负责这些程序的安装和登录。
 
-对于已安装的 ACP v1 适配器，使用：
-
-```sh
-wtable recruit assistant --backend acp -- /absolute/path/to/acp-agent
-wtable send assistant '分析当前项目并给出实现建议'
-wtable tasks
-```
-
-ACP 任务会自动执行，输出、工具步骤和权限请求显示在 TUI 中。只有明确选择权限选项才会响应；按 Enter 不会自动批准。没有打开 TUI 时，可运行 `permissions` 查看请求，再用 `approve REQUEST OPTION` 选择返回的选项 ID。
-
-PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之间切换，也不从终端静默或输出格式推断任务完成。
+所有新 pane 均使用 PTY 后端。任务通过终端投递，并遵循下文说明的 `ack`/`result` 契约。工作台不会根据终端静默、输出格式或 provider 回合结束推断任务完成。
 
 ## 控制面板与 Agent 接入
 
@@ -78,22 +70,20 @@ PTY 和 ACP 是不同后端。当前不提供同一 provider 会话在两者之�
 | Tasks | `s` 多目标派活、Enter 动作列表（详情/重发/取消）、`r` 重发、`x` 取消、`b` 报告收件箱 |
 | Layers | `n` 创建 worktree、Enter 将选中目录设为新 pane 的默认目录 |
 
-添加 Agent 时可选择预设、PTY/ACP、目录、Layer、角色、账号档案、是否注入说明，以及新 Agent 可以派活给哪些已有 pane。自定义命令支持引号和转义来组合参数，不展开变量或执行 shell 语法。需要 shell 时请显式填写 `/bin/zsh -lc '命令'`。
+添加 Agent 时可选择预设、目录、Layer、角色、账号档案、是否注入说明，以及新 Agent 可以派活给哪些已有 pane。自定义命令支持引号和转义来组合参数，不展开变量或执行 shell 语法。需要 shell 时请显式填写 `/bin/zsh -lc '命令'`。
 
-内置预设包括 Shell、Codex PTY、Codex ACP、Claude PTY 和 Agy PTY。探测只检查本地二进制，并对已知程序运行限时 `--version`；不会修改登录态。未安装 `codex-acp` 时明确显示不可用，不自动下载。找到二进制不等于已验证登录或协议兼容。
+内置预设包括 Shell、Codex PTY、Claude PTY 和 Agy PTY；`wtable presets` 与创建面板只列出 PTY 预设。探测只检查本地二进制，并对已知程序运行限时 `--version`；不会修改登录态。找到二进制不等于已验证登录或与当前 CLI 版本兼容。
 
 ```sh
 wtable presets
 wtable recruit coder --preset codex-pty --role '实现与验证' --brief
-wtable recruit reviewer --preset codex-acp --role '只读复核' --brief --connect coder
+wtable recruit reviewer --preset claude-pty --role '只读复核' --brief --connect coder
 wtable brief coder
 wtable brief send coder
 wtable pane edit --role '负责重试逻辑' coder
 ```
 
-面板选择非 Shell 预设时默认启用身份说明；CLI 的 `--brief` 显式开启。说明不超过 2048 UTF-8 字节，保存在 `<WTABLE_HOME>/briefs/<pane>.md`，权限为 `0600`。启用时通过 `WTABLE_BRIEF` 暴露路径，并经 P0 闸门排队投递。内容包括身份、目录、角色、当前有权联系的 peer 和回报约定，不包含凭据。brief 是常驻说明，不是委派任务：不占用忙碌闸门，不出现在任务列表或收件箱，也不需要 `ack/result`。之后收到的正式任务仍按 PTY 的 `ack/result` 或 ACP 的回合结束自动回报。重启不会自动重放已有说明，可显式重发。
-
-ACP pane 底部有常驻输入框，直接输入并按 Enter 即通过原任务队列提交，复用当前 session；Alt-Enter 换行，粘贴插入光标处。权限请求始终优先，Enter 不批准。
+面板选择非 Shell 预设时默认启用身份说明；CLI 的 `--brief` 显式开启。说明不超过 2048 UTF-8 字节，保存在 `<WTABLE_HOME>/briefs/<pane>.md`，权限为 `0600`。启用时通过 `WTABLE_BRIEF` 暴露路径，并经 P0 闸门排队投递。内容包括身份、目录、角色、当前有权联系的 peer 和回报约定，不包含凭据。brief 是常驻说明，不是委派任务：不占用忙碌闸门，不出现在任务列表或收件箱，也不需要 `ack/result`。之后收到的正式任务仍按 PTY 的 `ack/result` 契约回报。重启不会自动重放已有说明，可显式重发。
 
 编辑运行中的 pane 可以修改名字与角色；账号只能在退出、失败或中断后修改。命令、后端和目录变更需要重新创建。移除前须按 `y` 确认：进程停止、相关排队任务取消、授权边移除，任务/报告/brief 历史保留。非零退出显示 `failed`、退出码、脱敏后的尾部摘要和日志路径；正常退出码 0 保留 `exited`。
 
@@ -145,13 +135,13 @@ wtable role delete reviewer
 
 ### 左栏、主画布、工具槽与收件箱
 
-工作台只有一个主画布、一个可选工具槽和常驻左栏。左栏按固定顺序分三组：「需要你」（审批、退出、投递受阻、未读回复、人类任务结果）、「前台」（最多一个 PTY 前台 agent）、「Workers」。从左栏选中任意 agent 只会替换主画布，不再分屏。`Ctrl-a s` 打开右侧工具槽（默认 shell，cwd 跟随主画布），再按一次关闭；关闭只把它移出画布，进程仍在左栏运行，下次 `Ctrl-a s` 复用同一个 pane。没有 tab、驻留、zoom、布局树或分屏。
+工作台只有一个主画布、一个可选工具槽和常驻左栏。左栏按固定顺序分三组：「需要你」（退出、投递受阻、未读回复、人类任务结果）、「前台」（最多一个 PTY 前台 agent）、「Workers」。从左栏选中任意 agent 只会替换主画布，不再分屏。`Ctrl-a s` 打开右侧工具槽（默认 shell，cwd 跟随主画布），再按一次关闭；关闭只把它移出画布，进程仍在左栏运行，下次 `Ctrl-a s` 复用同一个 pane。没有 tab、驻留、zoom、布局树或分屏。
 
-前台 agent 是人主要对话的那一个，只能是 PTY；ACP 只用于 worker。API 会拒绝 `foreground + acp` 和第二个前台。首次启动打开一次 Enter 即可完成的 PTY 预设选择器（不出现 ACP）；没有可用 PTY 时提供「重新检测」和「创建临时 shell」两个出路。重新接入时服务端恢复上次聚焦的 pane，若已退出则选下一个运行中的 pane；工具槽不自动恢复。
+前台 agent 是人主要对话的那一个，只能是 PTY。API 会拒绝第二个前台。首次启动打开一次 Enter 即可完成的 PTY 预设选择器；没有可用 PTY 时提供「重新检测」和「创建临时 shell」两个出路。重新接入时服务端恢复上次聚焦的 pane，若已退出则选下一个运行中的 pane；工具槽不自动恢复。
 
-左栏每行只显示一个主信号：审批 `⏳` → 退出 `✕` → 未读 `◉` → 排队 `⏸` → 运行/空闲。主画布标题使用固定槽位，只显示非零项（`▌ coder · ◐ running · 12s · ⏸2 ⏳1 ◉3`）。ACP 新回复只在别的 pane 聚焦时计为未读；只有真正打开某个 pane 才清除它的未读。后台 PTY 保持最后尺寸，只有主画布和工具槽请求画面与 resize。列表显示输出摘要、最近活动、未读、就绪状态、端点类型及越权次数。创建表单提示同目录／Layer 和同账号运行实例；在选项字段按 `L` 先创建隔离 Layer，再返回表单。`ready` 表示当前投递闸门通过，不代表 agent 已收到或接手任务。
+左栏每行只显示一个主信号：退出 `✕` → 未读 `◉` → 排队 `⏸` → 运行/空闲。主画布标题使用固定槽位，只显示非零项（`▌ coder · ◐ running · 12s · ⏸2 ◉3`）。只有真正打开某个 pane 才清除它的未读。后台 PTY 保持最后尺寸，只有主画布和工具槽请求画面与 resize。列表显示输出摘要、最近活动、未读、就绪状态、端点类型及越权次数。创建表单提示同目录／Layer 和同账号运行实例；在选项字段按 `L` 先创建隔离 Layer，再返回表单。`ready` 表示当前投递闸门通过，不代表 agent 已收到或接手任务。
 
-`wtable inbox` 输出同样的收件箱；`wtable audit permissions` 查看审批决定（允许/拒绝/取消/过期）。
+`wtable inbox` 输出同样的收件箱。
 
 `state.get` 的 `ids` 现在区分三种情况：省略或 `null` 获取全部画面，`[]` 仅取元数据，非空数组只取指定 pane；`frames: false` 始终禁止画面。`pane.peek` 返回文本尾部，不分配整屏 Frame。
 
@@ -173,7 +163,6 @@ wtable role delete reviewer
 | `Ctrl-a 1..9` | 跳到左栏第 N 个 agent |
 | `Ctrl-a h` / `Ctrl-a l`，或 `Ctrl-a ←/→` | 主画布／工具槽切换焦点 |
 | `Ctrl-a a` | 聚焦左栏（`Esc` 返回；窄终端展开抽屉） |
-| `Ctrl-a p` | 聚焦下一个待审批请求 |
 | `Ctrl-a s` | 打开／关闭工具槽 |
 | `Ctrl-a t` | 任务输入条：排队、插话（目标声明且忙时才可用）、中断后发送 |
 | `Ctrl-a Space` | 命令面板 |
@@ -181,11 +170,11 @@ wtable role delete reviewer
 | `Ctrl-a q`（或 `d`） | detach，后台继续运行 |
 | `Ctrl-a Ctrl-a` | 发送字面 `Ctrl-a` |
 
-左栏内：`↑↓` 选择、`Enter` 打开、`Space` 动作、`n` 新建、`e` 编辑、`p` 工具槽、`x` 移除（输入 `y` 确认）、`/` 过滤、`Esc` 返回。审批卡内：`1..9` 选择、`r` 拒绝、`d` 稍后、`[` / `]` 切换请求、`Enter` 详情、`Esc` 收起。`R` 经 `y` 确认后拒绝该 pane 的全部请求；`A` 仅在全部请求属于同一工具、同一 `allow_always` 选项时允许全部（同样二次确认）。
+左栏内：`↑↓` 选择、`Enter` 打开、`Space` 动作、`n` 新建、`e` 编辑、`p` 工具槽、`x` 移除（输入 `y` 确认）、`/` 过滤、`Esc` 返回。
 
 输入条：`Enter` 发送/排队、`Ctrl-J` 换行、`Esc` 清空、`Ctrl-a Enter` 首次只提示、再次确认才中断并发送。低频动作（协作图、任务列表、队列、管理面板、工具槽方向、重启/停止、离开）都在 `Ctrl-a Space` 命令面板；`Ctrl-a G`（协作图）与 `Ctrl-a b`（任务）保留为兼容别名。
 
-点击左栏行打开该 agent；点击 pane、审批卡或输入条即可聚焦。拖动主画布与工具槽之间的唯一分隔线调整比例。弹窗打开时不响应鼠标聚焦和拖动。
+点击左栏行打开该 agent；点击 pane 或任务输入条即可聚焦。拖动主画布与工具槽之间的唯一分隔线调整比例。弹窗打开时不响应鼠标聚焦和拖动。
 
 在 pane 内容区按住左键拖选文字，松开后自动复制到 macOS 剪贴板；支持跨行、反向拖选及中文、emoji。选区固定当前可见画面，按 Esc 或再次点击恢复实时输出。选区限当前 pane 的可见内容，不跨 pane，也不自动滚屏。
 
@@ -206,7 +195,7 @@ wtable role delete reviewer
 
 Tasks 页按 `b` 打开报告收件箱。报告显示未读和 `undeliverable` 状态；Enter 查看摘要，再按 Enter 查看原任务（仍需原任务读取权限）。原始输入支持 `<Enter>`、`<Esc>`、`<Ctrl-C>` 和方向键标记，不自动追加回车。
 
-已退出的 pane 显示重启入口：聚焦后按 Enter、点击入口行，或按 `Ctrl-a R` 原地重启。重启保留 pane ID、名称与授权边，并重新执行原启动命令；PTY 的聊天历史恢复取决于原命令是否包含对应 Agent 的 resume 参数。
+已退出的 PTY pane 显示重启入口：聚焦后按 Enter、点击入口行，或按 `Ctrl-a R` 原地重启。重启保留 pane ID、名称与授权边，并重新执行原启动命令；PTY 的聊天历史恢复取决于原命令是否包含对应 Agent 的 resume 参数。旧 ACP 记录不能重启。
 
 普通按键直接送到 PTY。多行粘贴在应用没有启用 bracketed paste 时需要确认。复制使用 macOS `pbcopy`。
 
@@ -226,7 +215,7 @@ wtable wait --timeout 5m TASK_ID
 
 ### 投递与确认
 
-送达方式按目标能力选择：ACP 目标使用 `prompt`，PTY 目标使用 `push`，不再由发送方身份决定。`--delivery pull`（兼容旧名 `claim`）只对声明支持领取的 pane 可用；`inject` 作为 `push` 的兼容别名。无投递字段的排队任务按 `push` 处理。
+PTY 目标默认使用 `push`。`--delivery pull`（兼容旧名 `claim`）只对声明支持领取的 pane 可用；`inject` 作为 `push` 的兼容别名。无投递字段的排队任务按 `push` 处理。
 
 ```sh
 wtable send --delivery push coder '检查当前修改'
@@ -235,7 +224,7 @@ wtable send --steer coder '再补跑一遍测试'
 wtable send --queue coder '闸门允许后再发送'
 ```
 
-Steer 只在该目标正在执行 turn 且声明了 `push_steer` 时接受；等待权限确认的 pane 不接受 steer。发给空闲目标会直接报错而不是排队。若 turn 在投递前结束，已排队的 steer 会降级为普通 `push`，避免被插进之后一个无关的 turn。
+Steer 只在该目标正在执行任务且声明了 `push_steer` 时接受。发给空闲目标会直接报错而不是排队。若当前工作在投递前结束，已排队的 steer 会降级为普通 `push`，避免被插进之后一个无关任务。
 
 注入前会检查进程、阻塞文案、输出稳定时间和未结束的前一条注入任务。默认稳定窗口为 400ms，写后验证为 3s，ACK 超时为 90s。直接启动 `codex`、`claude`、`agy` 时使用内置阻塞文案；`gemini`、`opencode`、`grok` 和其他程序或包装脚本需要自行配置，暂不属于已验证的内置适配：
 
@@ -246,7 +235,7 @@ wtable recruit coder --blocked-regex '(?i)(Log in|permission required)' \
 
 闸门拒绝时返回 `blocked:<line>`、`busy:<task>` 或 `not-ready`，不写入；有授权连线的 agent 发送方只会看到 `blocked` 类别，命中的终端行（已脱敏并截断）仅对控制端可见。`--queue` 才会保留任务并等待闸门。前一条注入任务处于 `delivered`、`accepted` 或 `cancelling` 时都算 busy；ACK 不解除 busy，ACK 超时也不会结束已接手的任务。支持 bracketed paste 时一次提交完整信封；否则发送包含任务 ID、prompt 和回报约定的单行 JSON。任务文本中的终端控制字符（含 ESC 与 CR）会显示为 Unicode 控制图片，prompt 无法提前结束 bracketed paste 或提交额外行。单行可能受目标终端输入长度限制，完整原文始终可通过 `task TASK_ID` 读取。
 
-`delivered` 只证明写入或协议投递。PTY agent 调用 `ack` 才进入 `accepted`；直接提交结果也可证明已接手。写后只看到回显时记录 `write-unconfirmed`，这不是失败，也不是完成。ACK 超时变为 `unknown`，不自动重投。ACP 首个当前 turn 的更新进入 `accepted`，turn 结束自动完成，不需要 CLI `result`。
+`delivered` 只证明已写入终端。PTY agent 调用 `ack` 才进入 `accepted`；直接提交结果也可证明已接手。写后只看到回显时记录 `write-unconfirmed`，这不是失败，也不是完成。ACK 超时变为 `unknown`，不自动重投。PTY 工作不会在回合结束时自动完成：接收方必须提交 `result`，或由人工记录结果。
 
 启动时注入 `WTABLE_CLI`、`WTABLE_PANE_ID`、`WTABLE_PEER_TOKEN` 和 `WTABLE_HOME`。在 agent pane 内执行：
 
@@ -290,7 +279,7 @@ wtable cancel --confirmed TASK_ID
 
 重发只接受失败、未知、取消或写入未确认的任务，保留原记录，并用 `RetryOf` 关联新任务。已在执行或排队的任务不能重发。重发写入未确认的任务时，原记录转为 `unknown` 并继续接受迟到结果；显式重发仍可能造成重复工作。
 
-排队任务直接取消；ACP 等待协议确认。注入任务先发送中断，进入 `cancelling`，再由人确认 `cancelled`。终端历史和已发生的文件操作不会被撤销。执行中的 `pull` 领取无法由 workbench 可靠停止；人工确认工作已停止后，用 `cancel --confirmed` 将其标记为 `cancelled` 并释放该 pane 的队列。
+排队任务直接取消。注入任务先发送中断，进入 `cancelling`，再由人确认 `cancelled`。终端历史和已发生的文件操作不会被撤销。执行中的 `pull` 领取无法由 workbench 可靠停止；人工确认工作已停止后，用 `cancel --confirmed` 将其标记为 `cancelled` 并释放该 pane 的队列。
 
 `wtable audit` 返回最近 256 条越权拒绝记录，只包含调用者、目标、方法与时间；每个 pane 的累计次数保存在元数据中。记录不包含请求正文或凭据。直接边检查已阻止 agent 向自身派活；目前没有内容来源追踪或 `--no-relay` 模式。
 
@@ -321,7 +310,7 @@ wtable shutdown
 
 - TUI detach 后，daemon、PTY 和 agent 保持运行。
 - daemon 重启后恢复 pane 配置、任务、结果和 worktree 记录；不会复活原 PTY 进程，也不会自动重放未知任务。
-- `restart` 是显式操作。ACP 有已保存的 session ID 时，仅在适配器支持 `loadSession` 时尝试恢复；不支持时明确报错，可以用新名称创建新会话。
+- `restart` 是显式操作，仅适用于 PTY pane。它重新执行原启动命令；只有命令包含 provider 的 resume 参数时才恢复聊天历史。旧 ACP 记录可查看或移除，但不能重启。
 - `shutdown` 停止这个状态目录下的 daemon 和所有 pane。日志位于状态目录的 `daemon.log`。
 
 ## 验证
@@ -340,13 +329,13 @@ python3 scripts/first_run_smoke.py --binary bin/wtable --output .dev/test-result
 python3 scripts/workspace_smoke.py --binary bin/wtable --output .dev/test-results/workspace.json
 ```
 
-smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授权、任务去重、审批文件效果、worktree 隔离与崩溃恢复。ACP 部分使用本地确定性 fixture，不调用外部模型。测试会清理自建的进程和临时目录，并保留 JSON 验收报告。
+验证脚本使用隔离状态和本地确定性 fixture，不调用外部模型。其中保留的 ACP fixture 仅用于测试适配器实现，不代表 ACP 是受支持的用户工作流；当前用户侧任务完成仍遵循 PTY 的 `ack`/`result` 契约。测试会清理自建的进程和临时目录，并保留 JSON 验收报告。
 
-外部 provider 的登录、适配器兼容性和恢复能力需要针对实际安装版本验证，不能由 fixture 测试结果推出。
+外部 provider 的登录、CLI 兼容性和 PTY 会话恢复能力需要针对实际安装版本验证，不能由 fixture 测试结果推出。
 
 ## 本地开发 fixture
 
-`make tui` 在 `.dev/devstack` 打开隔离 TUI，只列本机真实 agent；`make tui-fixtures` 额外提供确定性的 PTY 与 ACP fixture。`make dev` 只启动 daemon 不进入界面；`make dev-clean` 清掉 fixture pane，`make dev-down` 回收整个开发栈。两者都不读写默认状态目录。`scripts/dev.sh add fg|pty|auto|acp|shell [NAME]` 添加 fixture pane，`kill NAME` 移除一个，`clean` 清掉所有 `dev-*` pane。`auto` fixture 会自动 ack 并完成注入任务，无需模型即可观察任务与报告界面。
+`make tui` 在 `.dev/devstack` 打开隔离 TUI，只列本机真实 agent；`make tui-fixtures` 额外提供确定性的 PTY fixture。`make dev` 只启动 daemon 不进入界面；`make dev-clean` 清掉 fixture pane，`make dev-down` 回收整个开发栈。两者都不读写默认状态目录。`scripts/dev.sh add fg|pty|auto|shell [NAME]` 添加 PTY fixture pane，`kill NAME` 移除一个，`clean` 清掉所有 `dev-*` pane。`auto` fixture 会通过 `ack`/`result` 显式确认并完成注入任务，无需模型即可观察任务与报告界面。
 
 ## 当前限制
 
@@ -355,7 +344,7 @@ smoke 脚本使用真实 daemon、PTY、SQLite 和临时 Git 仓库，断言授�
 - 使用完整 cell 快照轮询，尚未实现 cell 差分与事件重放；原计划中的性能预算尚未验收。
 - 支持可见内容的鼠标选区复制、键盘回看和复制可见屏；支持向启用鼠标协议的应用转发滚轮，暂不转发点击和拖动，也不支持 OSC 52 剪贴板协议。
 - 主画布选择由服务端 `last_focus` 记录，attach 时恢复；工具槽及其比例不持久化。左栏顺序为稳定的创建顺序。
-- 每个工作区最多保留 32 个 pane（全局 128 个）、2,000 条任务，prompt 与 result 合计上限 64 MiB；pane 可从 Agents 页移除，任务历史尚无清理命令。结构化聊天视图有大小上限，完整任务结果单独保存。
+- 每个工作区最多保留 32 个 pane（全局 128 个）、2,000 条任务，prompt 与 result 合计上限 64 MiB；pane 可从 Agents 页移除，任务历史尚无清理命令。保存的消息历史有大小上限，完整任务结果单独保存。
 - notes、内置编辑器、账号池、计划任务、图片和浏览器门户属于后续范围。
 
 当前实现完成 P0 送达与回传、P1 控制面板和身份说明接入，以及 P2 Graph v1。`docs/`、`.dev/` 和 `bin/` 均由 Git 白名单规则忽略。
