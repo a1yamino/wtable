@@ -27,10 +27,18 @@ The supported deployment target is macOS 13 or newer. `make desktop` pins the
 cgo compiler and linker deployment target to 13.0 to match the Go toolchain and
 the application plist.
 
-The prototype currently supports:
+The desktop UI currently supports:
 
-- workspace selection
-- live PTY output through the raw terminal stream
-- terminal input and resize
-- creating a foreground shell
-- focusing panes from the rail or collaboration canvas
+- collapsible workspace groups with per-agent backend and state labels
+- a focused main-agent view with one resizable auxiliary terminal
+- a spatial Board where agents can be moved without overlapping
+- multiple terminals expanded and resized inside Board nodes
+- creating and deleting shell or installed-agent panes
+- editing pane names, roles, accounts, and the main-agent designation
+- bidirectional authorization links with per-direction control
+- locally saved global topology templates with Board preview and overrides
+- live PTY output, input, resize, and automatic workspace refresh
+
+Structured task dispatch, Markdown session rendering, logs, reusable execution
+order, and freely arranged multi-terminal Focus layouts are intentionally
+deferred.

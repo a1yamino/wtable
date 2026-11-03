@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 
@@ -10,54 +9,59 @@ import type { Pane } from '../types'
 type Props = {
   pane?: Pane
   onError(message: string): void
+  autoFocus?: boolean
 }
 
-export function TerminalPane({ pane, onError }: Props) {
+export type StreamState = 'idle' | 'live' | 'retry'
+
+export function TerminalSurface({ pane, onError, autoFocus = true }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | undefined>(undefined)
   const paneRef = useRef<Pane | undefined>(pane)
   const errorRef = useRef(onError)
-  const [streamState, setStreamState] = useState<'idle' | 'live' | 'retry'>('idle')
+  const mountedRef = useRef(false)
+  const [streamState, setStreamState] = useState<StreamState>('idle')
 
   paneRef.current = pane
   errorRef.current = onError
 
   useEffect(() => {
     if (!hostRef.current) return
+    mountedRef.current = true
     const terminal = new Terminal({
       allowProposedApi: true,
       cursorBlink: true,
       cursorStyle: 'bar',
       cursorWidth: 2,
-      fontFamily: '"SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, monospace',
-      fontSize: 13.5,
+      fontFamily: '"SFMono-Regular", "Cascadia Code", "Menlo", monospace',
+      fontSize: 12.5,
       fontWeight: 'normal',
       fontWeightBold: 'bold',
-      letterSpacing: 0.1,
-      lineHeight: 1.24,
+      letterSpacing: 0,
+      lineHeight: 1.35,
       scrollback: 10000,
-      smoothScrollDuration: 90,
+      smoothScrollDuration: 70,
       theme: {
-        background: '#0b1017',
-        foreground: '#d7e0eb',
-        cursor: '#8df0c8',
-        cursorAccent: '#0b1017',
-        selectionBackground: '#31526780',
-        black: '#1a202a',
-        red: '#ff6b7d',
-        green: '#8df0c8',
-        yellow: '#f4c86b',
-        blue: '#72a7ff',
-        magenta: '#d59cff',
-        cyan: '#72dfe6',
-        white: '#d7e0eb',
-        brightBlack: '#687585',
-        brightRed: '#ff8d9b',
-        brightGreen: '#b1f9dd',
-        brightYellow: '#ffe091',
-        brightBlue: '#9dc1ff',
-        brightMagenta: '#e7c2ff',
-        brightCyan: '#9aedf1',
+        background: '#080a0d',
+        foreground: '#d8dde4',
+        cursor: '#d9ddd8',
+        cursorAccent: '#080a0d',
+        selectionBackground: '#47515d80',
+        black: '#171b20',
+        red: '#d57f7f',
+        green: '#7bb592',
+        yellow: '#d0a363',
+        blue: '#9eafc3',
+        magenta: '#b5a1c8',
+        cyan: '#92b9b1',
+        white: '#d8dde4',
+        brightBlack: '#69727e',
+        brightRed: '#edaaaa',
+        brightGreen: '#a8d3b8',
+        brightYellow: '#e7c185',
+        brightBlue: '#bdcad9',
+        brightMagenta: '#cebfd9',
+        brightCyan: '#b6d2cc',
         brightWhite: '#ffffff',
       },
     })
@@ -65,14 +69,6 @@ export function TerminalPane({ pane, onError }: Props) {
     terminal.loadAddon(fit)
     terminal.open(hostRef.current)
     terminalRef.current = terminal
-
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => webgl.dispose())
-      terminal.loadAddon(webgl)
-    } catch {
-      // DOM renderer remains active when WebGL is unavailable in the webview.
-    }
 
     let input = ''
     let inputTimer: number | undefined
@@ -88,9 +84,7 @@ export function TerminalPane({ pane, onError }: Props) {
     }
     const inputDisposable = terminal.onData((data) => {
       input += data
-      if (inputTimer === undefined) {
-        inputTimer = window.setTimeout(flushInput, 8)
-      }
+      if (inputTimer === undefined) inputTimer = window.setTimeout(flushInput, 8)
     })
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
       const current = paneRef.current
@@ -104,26 +98,27 @@ export function TerminalPane({ pane, onError }: Props) {
       try {
         fit.fit()
       } catch {
-        // The host can briefly have zero dimensions while the split is moving.
+        // The host can briefly have zero size while a split or node is resized.
       }
     }
     const observer = new ResizeObserver(fitTerminal)
     observer.observe(hostRef.current)
     const raf = requestAnimationFrame(() => {
       fitTerminal()
-      terminal.focus()
+      if (autoFocus) terminal.focus()
     })
 
     return () => {
+      mountedRef.current = false
       cancelAnimationFrame(raf)
       observer.disconnect()
       if (inputTimer !== undefined) window.clearTimeout(inputTimer)
       inputDisposable.dispose()
       resizeDisposable.dispose()
-      terminal.dispose()
       terminalRef.current = undefined
+      terminal.dispose()
     }
-  }, [])
+  }, [autoFocus])
 
   useEffect(() => {
     const terminal = terminalRef.current
@@ -137,91 +132,61 @@ export function TerminalPane({ pane, onError }: Props) {
     let cursor = 0
     setStreamState('live')
 
+    const wait = () =>
+      new Promise<void>((resolve) => window.setTimeout(resolve, 900))
+    const isActive = () => active && mountedRef.current
+
     const pump = async () => {
-      while (active) {
-        while (active) {
+      while (isActive()) {
+        while (isActive()) {
           try {
             const attachment = await backend.attachTerminal(pane.id)
-            if (!active) return
+            if (!isActive()) return
             terminal.reset()
-            if (attachment.history) {
-              terminal.write(decodeBase64(attachment.history))
-            }
-            if (attachment.snapshot) {
-              terminal.write(decodeBase64(attachment.snapshot))
-            }
+            if (attachment.history) terminal.write(decodeBase64(attachment.history))
+            if (attachment.snapshot) terminal.write(decodeBase64(attachment.snapshot))
             cursor = attachment.cursor
             setStreamState('live')
             break
           } catch (error) {
-            if (!active) return
+            if (!isActive()) return
             setStreamState('retry')
             errorRef.current(errorMessage(error))
-            await new Promise((resolve) => window.setTimeout(resolve, 900))
+            await wait()
           }
         }
-        while (active) {
+        while (isActive()) {
           try {
             const chunk = await backend.readTerminal(pane.id, cursor)
-            if (!active) return
+            if (!isActive()) return
             if (chunk.cursor < cursor) break
             if (chunk.data) terminal.write(decodeBase64(chunk.data))
             cursor = chunk.cursor
             setStreamState('live')
           } catch (error) {
-            if (!active) return
+            if (!isActive()) return
             setStreamState('retry')
             errorRef.current(errorMessage(error))
-            await new Promise((resolve) => window.setTimeout(resolve, 900))
+            await wait()
           }
         }
       }
     }
+
     void pump()
-    requestAnimationFrame(() => terminal.focus())
+    if (autoFocus) requestAnimationFrame(() => terminal.focus())
     return () => {
       active = false
     }
-  }, [pane?.id])
-
-  const stateLabel =
-    streamState === 'live' ? '实时' : streamState === 'retry' ? '重连中' : '未连接'
+  }, [pane?.id, autoFocus])
 
   return (
-    <section className="terminal-card">
-      <header className="panel-heading terminal-heading">
-        <div className="terminal-title">
-          <span className={`pane-state ${pane?.state ?? 'idle'}`} />
-          <div>
-            <div className="eyebrow">TERMINAL</div>
-            <h2>{pane?.name ?? '选择一个会话'}</h2>
-          </div>
-        </div>
-        <div className="terminal-meta">
-          {pane?.kind === 'foreground' && <span className="soft-badge">前台</span>}
-          <span className={`stream-badge ${streamState}`}>
-            <i />
-            {stateLabel}
-          </span>
-        </div>
-      </header>
-      <div className="terminal-host">
-        <div ref={hostRef} className="xterm-host" />
-        {!pane && (
-          <div className="terminal-empty">
-            <div className="empty-orbit">
-              <span>›_</span>
-            </div>
-            <strong>还没有可显示的终端</strong>
-            <p>创建一个 shell，或从左侧打开现有 Agent。</p>
-          </div>
-        )}
-      </div>
-      <footer className="terminal-footer">
-        <span>{pane?.cwd ?? '—'}</span>
-        <span>{pane ? `${pane.backend.toUpperCase()} · ${pane.turn_state ?? pane.state}` : 'PTY'}</span>
-      </footer>
-    </section>
+    <div
+      ref={hostRef}
+      className="terminal-surface"
+      data-stream-state={streamState}
+      aria-label={pane ? `${pane.name} 终端` : '终端'}
+    />
   )
 }
 

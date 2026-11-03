@@ -10,6 +10,7 @@ export type Pane = {
   turn_state?: string
   preset?: string
   role?: string
+  account?: string
   unread?: number
   last_output?: string
   last_activity?: string
@@ -34,6 +35,11 @@ export type GraphEdge = {
   active: number
 }
 
+export type Edge = {
+  from: string
+  to: string
+}
+
 export type WorkspaceInfo = {
   path: string
   last_opened: string
@@ -45,6 +51,7 @@ export type WorkspaceInfo = {
 
 export type Snapshot = {
   panes: Pane[]
+  edges?: Edge[]
   graph?: {
     nodes: GraphNode[]
     edges: GraphEdge[]
@@ -59,6 +66,47 @@ export type Bootstrap = {
   workspace: string
   snapshot: Snapshot
   home: string
+}
+
+export type Preset = {
+  id: string
+  name: string
+  backend: string
+  command: string[]
+  available: boolean
+  version?: string
+  detail?: string
+}
+
+export type AccountInfo = {
+  name: string
+  endpoint: string
+}
+
+export type Catalog = {
+  presets: Preset[]
+  account_profiles: AccountInfo[]
+  accounts: string[]
+}
+
+export type SpawnPaneRequest = {
+  name: string
+  kind: string
+  preset: string
+  role: string
+  account: string
+  cwd: string
+  workspace: string
+  command: string[]
+  injectBrief: boolean
+}
+
+export type UpdatePaneRequest = {
+  id: string
+  name: string
+  role: string
+  account: string
+  workspace: string
 }
 
 export type TerminalChunk = {

@@ -1,10 +1,28 @@
-import type { Bootstrap, Pane, Snapshot, TerminalAttach, TerminalChunk } from './types'
+import type {
+  Bootstrap,
+  Catalog,
+  Edge,
+  Pane,
+  Snapshot,
+  SpawnPaneRequest,
+  TerminalAttach,
+  TerminalChunk,
+  UpdatePaneRequest,
+} from './types'
 
 type WailsApp = {
   Bootstrap(): Promise<Bootstrap>
   GetSnapshot(workspace: string): Promise<Snapshot>
+  GetAllSnapshot(): Promise<Snapshot>
+  GetCatalog(): Promise<Catalog>
   OpenWorkspace(path: string): Promise<Snapshot>
+  CreateWorkspace(path: string): Promise<Snapshot>
   FocusPane(id: string): Promise<void>
+  SpawnPane(args: SpawnPaneRequest): Promise<Pane>
+  UpdatePane(args: UpdatePaneRequest): Promise<Pane>
+  RemovePane(id: string): Promise<void>
+  AddEdge(from: string, to: string): Promise<Edge>
+  RemoveEdge(from: string, to: string): Promise<Edge>
   CreateShell(name: string): Promise<Pane>
   SendInput(id: string, data: string): Promise<void>
   ResizeTerminal(id: string, cols: number, rows: number): Promise<void>
@@ -37,9 +55,26 @@ export const backend = {
   },
   snapshot: async (workspace: string) =>
     normalizeSnapshot(await bridge().GetSnapshot(workspace)),
+  allSnapshot: async () => normalizeSnapshot(await bridge().GetAllSnapshot()),
+  catalog: async () => {
+    const result = await bridge().GetCatalog()
+    return {
+      ...result,
+      presets: result.presets ?? [],
+      account_profiles: result.account_profiles ?? [],
+      accounts: result.accounts ?? [],
+    }
+  },
   openWorkspace: async (path: string) =>
     normalizeSnapshot(await bridge().OpenWorkspace(path)),
+  createWorkspace: async (path: string) =>
+    normalizeSnapshot(await bridge().CreateWorkspace(path)),
   focusPane: async (id: string) => bridge().FocusPane(id),
+  spawnPane: async (args: SpawnPaneRequest) => bridge().SpawnPane(args),
+  updatePane: async (args: UpdatePaneRequest) => bridge().UpdatePane(args),
+  removePane: async (id: string) => bridge().RemovePane(id),
+  addEdge: async (from: string, to: string) => bridge().AddEdge(from, to),
+  removeEdge: async (from: string, to: string) => bridge().RemoveEdge(from, to),
   createShell: async (name: string) => bridge().CreateShell(name),
   sendInput: async (id: string, data: string) => bridge().SendInput(id, data),
   resizeTerminal: async (id: string, cols: number, rows: number) =>
@@ -63,6 +98,7 @@ function normalizeSnapshot(value: Snapshot | null | undefined): Snapshot {
   return {
     ...snapshot,
     panes: snapshot.panes ?? [],
+    edges: snapshot.edges ?? [],
     workspaces: snapshot.workspaces ?? [],
     graph: snapshot.graph
       ? {
