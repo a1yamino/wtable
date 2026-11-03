@@ -139,18 +139,41 @@ export function TerminalPane({ pane, onError }: Props) {
 
     const pump = async () => {
       while (active) {
-        try {
-          const chunk = await backend.readTerminal(pane.id, cursor)
-          if (!active) return
-          if (chunk.cursor < cursor) cursor = 0
-          if (chunk.data) terminal.write(decodeBase64(chunk.data))
-          cursor = chunk.cursor
-          setStreamState('live')
-        } catch (error) {
-          if (!active) return
-          setStreamState('retry')
-          errorRef.current(errorMessage(error))
-          await new Promise((resolve) => window.setTimeout(resolve, 900))
+        while (active) {
+          try {
+            const attachment = await backend.attachTerminal(pane.id)
+            if (!active) return
+            terminal.reset()
+            if (attachment.history) {
+              terminal.write(decodeBase64(attachment.history))
+            }
+            if (attachment.snapshot) {
+              terminal.write(decodeBase64(attachment.snapshot))
+            }
+            cursor = attachment.cursor
+            setStreamState('live')
+            break
+          } catch (error) {
+            if (!active) return
+            setStreamState('retry')
+            errorRef.current(errorMessage(error))
+            await new Promise((resolve) => window.setTimeout(resolve, 900))
+          }
+        }
+        while (active) {
+          try {
+            const chunk = await backend.readTerminal(pane.id, cursor)
+            if (!active) return
+            if (chunk.cursor < cursor) break
+            if (chunk.data) terminal.write(decodeBase64(chunk.data))
+            cursor = chunk.cursor
+            setStreamState('live')
+          } catch (error) {
+            if (!active) return
+            setStreamState('retry')
+            errorRef.current(errorMessage(error))
+            await new Promise((resolve) => window.setTimeout(resolve, 900))
+          }
         }
       }
     }

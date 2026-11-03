@@ -65,3 +65,9 @@ export type TerminalChunk = {
   data: string
   cursor: number
 }
+
+export type TerminalAttach = {
+  history: string
+  snapshot: string
+  cursor: number
+}

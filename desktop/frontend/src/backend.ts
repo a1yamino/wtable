@@ -1,4 +1,4 @@
-import type { Bootstrap, Pane, Snapshot, TerminalChunk } from './types'
+import type { Bootstrap, Pane, Snapshot, TerminalAttach, TerminalChunk } from './types'
 
 type WailsApp = {
   Bootstrap(): Promise<Bootstrap>
@@ -8,6 +8,7 @@ type WailsApp = {
   CreateShell(name: string): Promise<Pane>
   SendInput(id: string, data: string): Promise<void>
   ResizeTerminal(id: string, cols: number, rows: number): Promise<void>
+  AttachTerminal(id: string): Promise<TerminalAttach>
   ReadTerminal(id: string, cursor: number): Promise<TerminalChunk>
 }
 
@@ -43,6 +44,7 @@ export const backend = {
   sendInput: async (id: string, data: string) => bridge().SendInput(id, data),
   resizeTerminal: async (id: string, cols: number, rows: number) =>
     bridge().ResizeTerminal(id, cols, rows),
+  attachTerminal: async (id: string) => bridge().AttachTerminal(id),
   readTerminal: async (id: string, cursor: number) => bridge().ReadTerminal(id, cursor),
 }
 

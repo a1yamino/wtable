@@ -26,6 +26,12 @@ type TerminalChunk struct {
 	Cursor uint64 `json:"cursor"`
 }
 
+type TerminalAttach struct {
+	History  string `json:"history"`
+	Snapshot string `json:"snapshot"`
+	Cursor   uint64 `json:"cursor"`
+}
+
 type App struct {
 	ctx        context.Context
 	control    *rpc.Client
@@ -231,6 +237,30 @@ func (a *App) ResizeTerminal(id string, cols, rows int) error {
 	return a.control.Call(ctx, "pane.resize", map[string]any{
 		"id": id, "workspace": a.workspace, "cols": cols, "rows": rows,
 	}, nil)
+}
+
+func (a *App) AttachTerminal(id string) (TerminalAttach, error) {
+	if a.startupErr != nil {
+		return TerminalAttach{}, a.startupErr
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
+	defer cancel()
+	var attachment struct {
+		History  []byte `json:"history"`
+		Snapshot []byte `json:"snapshot"`
+		Cursor   uint64 `json:"cursor"`
+	}
+	err := a.control.Call(ctx, "pane.attach", map[string]string{
+		"id": id, "workspace": a.workspace,
+	}, &attachment)
+	if err != nil {
+		return TerminalAttach{}, err
+	}
+	return TerminalAttach{
+		History:  base64.StdEncoding.EncodeToString(attachment.History),
+		Snapshot: base64.StdEncoding.EncodeToString(attachment.Snapshot),
+		Cursor:   attachment.Cursor,
+	}, nil
 }
 
 func (a *App) ReadTerminal(id string, cursor uint64) (TerminalChunk, error) {

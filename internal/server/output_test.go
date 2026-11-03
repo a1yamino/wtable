@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,29 @@ func TestPaneOutputCursorAndImmediateRead(t *testing.T) {
 	}
 	if string(chunk.Data) != "hello" || chunk.Cursor != 5 {
 		t.Fatalf("unexpected output chunk: %q cursor=%d", chunk.Data, chunk.Cursor)
+	}
+	result, err = s.dispatch(connection{principal: "controller"}, "pane.attach", rawTask(map[string]any{
+		"id": pane.ID,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attachment struct {
+		History  []byte `json:"history"`
+		Snapshot []byte `json:"snapshot"`
+		Cursor   uint64 `json:"cursor"`
+	}
+	if err = json.Unmarshal(data, &attachment); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(attachment.History), "hello") ||
+		!strings.Contains(string(attachment.Snapshot), "hello") ||
+		attachment.Cursor != chunk.Cursor {
+		t.Fatalf("unexpected attachment: history=%q snapshot=%q cursor=%d", attachment.History, attachment.Snapshot, attachment.Cursor)
 	}
 
 	start = time.Now()

@@ -133,6 +133,53 @@ exit 37`
 	}
 }
 
+func TestAttachRestoresVisibleScreenAndLiveCursor(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	term, err := Start(ctx, Config{
+		Command: []string{"/bin/sh", "-c", `printf '\033[2J\033[H\033[1;38;2;141;240;200mRECOVERED\033[0m'; IFS= read -r line; printf '\r\nLIVE'`},
+		Cols:    40,
+		Rows:    6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = term.Close() })
+	for !strings.Contains(frameText(term.Snapshot(0)), "RECOVERED") {
+		select {
+		case <-ctx.Done():
+			t.Fatal("screen did not reach recovery marker")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	attachment := term.Attach()
+	if !strings.Contains(string(attachment.History), "RECOVERED") {
+		t.Fatalf("history missing screen data: %q", attachment.History)
+	}
+	if !strings.Contains(string(attachment.Snapshot), "RECOVERED") ||
+		!strings.Contains(string(attachment.Snapshot), "\x1b[?2004l") {
+		t.Fatalf("snapshot is incomplete: %q", attachment.Snapshot)
+	}
+	if attachment.Cursor != uint64(len(attachment.History)) {
+		t.Fatalf("cursor/history mismatch: %d != %d", attachment.Cursor, len(attachment.History))
+	}
+
+	if err = term.Input([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	cursor := attachment.Cursor
+	live := strings.Builder{}
+	for !strings.Contains(live.String(), "LIVE") {
+		out, err := term.WaitRawOutput(ctx, cursor, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		live.Write(out.Data)
+		cursor = out.Cursor
+	}
+}
+
 func frameText(f model.Frame) string {
 	var b strings.Builder
 	for _, row := range f.Cells {

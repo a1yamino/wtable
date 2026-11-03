@@ -36,6 +36,15 @@ type Output struct {
 	Cursor uint64
 }
 
+// Attachment is an atomic terminal reattach payload. History restores
+// scrollback when available, Snapshot authoritatively redraws the visible
+// screen, and Cursor starts the live stream without duplicating output.
+type Attachment struct {
+	History  []byte
+	Snapshot []byte
+	Cursor   uint64
+}
+
 type Config struct {
 	Command  []string
 	Cwd      string
@@ -231,6 +240,24 @@ func (t *Terminal) WaitRawOutput(ctx context.Context, cursor uint64, maxBytes in
 	}
 }
 
+// Attach captures the visible screen, retained raw history and live cursor as
+// one state transition. Output processing uses the same lock order, so no PTY
+// bytes can fall between the snapshot and the returned cursor.
+func (t *Terminal) Attach() Attachment {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	frame := t.snapshotLocked(0)
+	t.outputMu.Lock()
+	history := append([]byte(nil), t.output...)
+	cursor := t.outputNext
+	t.outputMu.Unlock()
+	return Attachment{
+		History:  history,
+		Snapshot: frameANSI(frame),
+		Cursor:   cursor,
+	}
+}
+
 func (t *Terminal) Resize(cols, rows int) error {
 	if err := validSize(cols, rows); err != nil {
 		return err
@@ -263,6 +290,10 @@ func (t *Terminal) Resize(cols, rows int) error {
 func (t *Terminal) Snapshot(offset int) model.Frame {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.snapshotLocked(offset)
+}
+
+func (t *Terminal) snapshotLocked(offset int) model.Frame {
 	cols, rows := t.vt.Width(), t.vt.Height()
 	alt := t.vt.IsAltScreen()
 	history := 0
@@ -359,8 +390,8 @@ func (t *Terminal) readOutput() {
 	for {
 		n, err := t.pty.Read(buf)
 		if n > 0 {
-			t.retainOutput(buf[:n])
 			t.mu.Lock()
+			t.retainOutput(buf[:n])
 			_, vtErr := t.vt.Write(buf[:n])
 			t.lastOutput = time.Now()
 			t.revision++

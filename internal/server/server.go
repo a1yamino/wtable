@@ -838,6 +838,33 @@ func (s *Server) dispatch(c connection, method string, raw json.RawMessage) (res
 			return nil, errors.New("没有可读取的终端画面")
 		}
 		return t.Snapshot(max(0, min(10000, a.Offset))), nil
+	case "pane.attach":
+		var a struct {
+			ID        string `json:"id"`
+			Workspace string `json:"workspace,omitempty"`
+		}
+		if err := decode(raw, &a); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		p, err := s.resolvePaneLocked(a.Workspace, a.ID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		t := s.terminals[p.ID]
+		s.mu.Unlock()
+		if t == nil {
+			return nil, errors.New("pane 没有运行中的 PTY")
+		}
+		attachment := t.Attach()
+		return struct {
+			History  []byte `json:"history"`
+			Snapshot []byte `json:"snapshot"`
+			Cursor   uint64 `json:"cursor"`
+		}{
+			History: attachment.History, Snapshot: attachment.Snapshot, Cursor: attachment.Cursor,
+		}, nil
 	case "pane.output":
 		var a struct {
 			ID        string `json:"id"`
