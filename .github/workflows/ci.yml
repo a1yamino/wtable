@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -24,7 +24,7 @@ jobs:
         run: go test -race ./cmd/... ./internal/...
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -81,7 +81,7 @@ jobs:
   notify:
     if: always()
     needs: [backend, frontend, desktop]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Notify Telegram
         continue-on-error: true
@@ -109,7 +109,7 @@ jobs:
           token = os.environ["TELEGRAM_BOT_TOKEN"]
           chat_id = os.environ["TELEGRAM_CHAT_ID"]
           if not token or not chat_id:
-              print("::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured")
+              print("::warning title=Telegram notification skipped::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured")
               sys.exit(0)
 
           results = {
@@ -125,33 +125,44 @@ jobs:
               status = "failure"
 
           presentations = {
-              "success": ("✅", "CI 已通过", "后端、前端与 macOS 桌面构建全部通过"),
-              "failure": ("❌", "CI 未通过", "请打开运行记录查看失败详情"),
-              "cancelled": ("⚪", "CI 已取消", "本次运行未完成"),
+              "success": ("✅", "CI passed", "All backend, frontend, and macOS desktop checks passed."),
+              "failure": ("❌", "CI failed", "One or more checks failed. Open the workflow run for details."),
+              "cancelled": ("⚪", "CI cancelled", "The workflow was cancelled before completion."),
           }
           icon, title, summary = presentations.get(
-              status, ("ℹ️", "CI 状态更新", f"当前状态：{status}")
+              status, ("ℹ️", "CI status updated", f"Current status: {status}")
           )
+          result_icons = {
+              "success": "✅",
+              "failure": "❌",
+              "cancelled": "⚪",
+              "skipped": "⏭️",
+          }
 
           def value(name):
               return html.escape(os.environ.get(name, ""), quote=True)
+
+          def job_line(name, result):
+              icon = result_icons.get(result, "ℹ️")
+              return f"{icon} <b>{name}</b>  <code>{html.escape(result)}</code>"
 
           commit = value("COMMIT_SHA")[:7]
           message = "\n".join(
               [
                   f"<b>{icon} wtable · {html.escape(title)}</b>",
                   f"<blockquote>{html.escape(summary)}</blockquote>",
-                  "<b>运行信息</b>",
-                  f"├ 状态　<b>{html.escape(status)}</b>",
-                  f"├ 后端　<code>{html.escape(results['backend'])}</code>",
-                  f"├ 前端　<code>{html.escape(results['frontend'])}</code>",
-                  f"├ 桌面　<code>{html.escape(results['desktop'])}</code>",
-                  f"├ 分支　<code>{value('BRANCH')}</code>",
-                  f"├ 提交　<code>{commit}</code>",
-                  f"├ 事件　{value('EVENT_NAME')} · {value('ACTOR')}",
-                  f"└ 仓库　<code>{value('REPOSITORY')}</code>",
                   "",
-                  f'<a href="{value("RUN_URL")}">查看 GitHub Actions 运行记录 →</a>',
+                  "<b>Checks</b>",
+                  job_line("Backend", results["backend"]),
+                  job_line("Frontend", results["frontend"]),
+                  job_line("Desktop", results["desktop"]),
+                  "",
+                  f"<b>Repository</b>  <code>{value('REPOSITORY')}</code>",
+                  f"<b>Branch</b>  <code>{value('BRANCH')}</code>",
+                  f"<b>Commit</b>  <code>{commit}</code>",
+                  f"<b>Trigger</b>  {value('EVENT_NAME')} by {value('ACTOR')}",
+                  "",
+                  f'<a href="{value("RUN_URL")}">Open workflow run →</a>',
               ]
           )
           payload = json.dumps(
@@ -172,7 +183,7 @@ jobs:
                   response.read()
           except urllib.error.HTTPError as exc:
               detail = exc.read().decode("utf-8", errors="replace")
-              print(f"::warning::Telegram notification failed: {detail}")
+              print(f"::warning title=Telegram notification failed::HTTP {exc.code}: {detail}")
           except urllib.error.URLError as exc:
-              print(f"::warning::Telegram notification failed: {exc.reason}")
+              print(f"::warning title=Telegram notification failed::{exc.reason}")
           PY
