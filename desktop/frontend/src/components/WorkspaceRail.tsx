@@ -52,7 +52,6 @@ export function WorkspaceRail({
 
   return (
     <aside className="workspace-rail" aria-label="工作区与 Agent">
-      <div className="window-drag-region" aria-hidden="true" />
       <header className="rail-heading">
         <div className="brand-lockup">
           <span className="brand-symbol" aria-hidden="true">

@@ -20,6 +20,7 @@ import {
 } from './templates'
 import type { Catalog, Pane, Snapshot, WorkspaceInfo } from './types'
 import { baseName, errorMessage } from './ui'
+import { installWindowDragFallback } from './windowDrag'
 
 type LoadState = 'loading' | 'ready' | 'error'
 
@@ -143,6 +144,8 @@ export default function App() {
       window.clearTimeout(timer)
     }
   }, [showNotice, status])
+
+  useEffect(() => installWindowDragFallback(), [])
 
   useEffect(() => {
     try {

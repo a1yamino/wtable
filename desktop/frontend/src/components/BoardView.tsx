@@ -379,13 +379,18 @@ export function BoardView({
       onPointerDown={handleBoardPointerDown}
       onWheel={handleWheel}
     >
-      <header className="board-context">
-        <h1>{workspaceName}</h1>
-        <p>
-          {panes.length} 个 Agent
-          <span aria-hidden="true">·</span>
-          {pairs.length} 条授权连接
-        </p>
+      <header className="board-context" title="拖动窗口">
+        <div>
+          <h1>{workspaceName}</h1>
+          <p>
+            {panes.length} 个 Agent
+            <span aria-hidden="true">·</span>
+            {pairs.length} 条授权连接
+          </p>
+        </div>
+        <span className="board-drag-hint" role="img" aria-label="拖动窗口">
+          <Grip size={15} />
+        </span>
       </header>
 
       {preview && (
