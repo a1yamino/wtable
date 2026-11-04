@@ -1,8 +1,7 @@
-.PHONY: build test smoke check tui tui-fixtures dev dev-down dev-clean install uninstall desktop desktop-dev
+.PHONY: build test smoke check tui tui-fixtures dev dev-down dev-clean install uninstall desktop desktop-dev desktop-mygo desktop-mygo-dev
 
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
-WAILS_MACOS_ENV = CGO_ENABLED=1 CGO_CFLAGS="-mmacosx-version-min=13.0" CGO_CXXFLAGS="-mmacosx-version-min=13.0" CGO_LDFLAGS="-mmacosx-version-min=13.0"
 
 build:
 	go build -o bin/wtable ./cmd/wtable
@@ -48,8 +47,12 @@ smoke: build
 check:
 	go vet ./...
 
-desktop:
-	cd desktop && $(WAILS_MACOS_ENV) wails build
+desktop: desktop-mygo
 
-desktop-dev:
-	cd desktop && $(WAILS_MACOS_ENV) wails dev
+desktop-dev: desktop-mygo-dev
+
+desktop-mygo:
+	cd desktop-mygo && CGO_ENABLED=0 go tool mygo build -skip-dmg
+
+desktop-mygo-dev:
+	cd desktop-mygo && CGO_ENABLED=0 go tool mygo dev

@@ -183,7 +183,13 @@ def run(args):
         presets = rpc.call("preset.list")["presets"]
         assert all(p["backend"] == "pty" for p in presets)
         assert not any(p["id"] in ("disabled-acp", "codex-acp") for p in presets)
-        assert rpc.call("state.get", {"frames": False})["panes"] == panes_before
+        panes_after = rpc.call("state.get", {"frames": False})["panes"]
+        # Readiness is derived from elapsed time since PTY output; it can
+        # settle while the rejected requests and catalog probe run.
+        for pane in panes_before + panes_after:
+            pane.pop("readiness", None)
+            pane.pop("readiness_reason", None)
+        assert panes_after == panes_before
         assert not acp_marker.exists(), "rejected ACP command was executed"
         record("acp_spawn_rejected_and_preset_catalog_hidden")
 

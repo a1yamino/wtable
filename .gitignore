@@ -37,16 +37,14 @@
 !/internal/tui/*.go
 !/internal/daemon/
 !/internal/daemon/*.go
+!/internal/cli/
+!/internal/cli/*.go
 
-# Wails desktop prototype.
-!/desktop/
-!/desktop/**
-/desktop/frontend/node_modules/
-/desktop/frontend/wailsjs/
-/desktop/frontend/package.json.md5
-/desktop/frontend/dist/*
-!/desktop/frontend/dist/.gitkeep
-/desktop/build/bin/
+# Native MyGo desktop.
+!/desktop-mygo/
+!/desktop-mygo/**
+/desktop-mygo/build/
+/desktop-mygo/.mygo/
 
 # Maintained scripts.
 !/scripts/

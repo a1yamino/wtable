@@ -10,7 +10,7 @@ macOS 上的终端多 Agent 工作台。使用 Go、自有 pane 和真实 PTY，
 
 ## 启动
 
-需要 Go 1.27 或以上版本。Git 功能需要本机 Git；agent 使用各自已安装的程序和登录配置。
+需要 Go 1.27.3 或以上版本。Git 功能需要本机 Git；agent 使用各自已安装的程序和登录配置。
 
 安装一次后，可以从任意目录运行：
 
@@ -32,7 +32,21 @@ export WTABLE_HOME="$PWD/.dev/local"
 wtable
 ```
 
-`WTABLE_HOME` 应使用较短的绝对路径，以满足 macOS Unix socket 的长度限制。同一个状态目录只运行一个 daemon、一个可写 TUI。
+`WTABLE_HOME` 应使用较短的绝对路径，以满足 macOS Unix socket 的长度限制。同一个状态目录只运行一个 daemon，以及一个可写界面（TUI 或桌面应用）。
+
+## 原生桌面
+
+桌面应用使用 MyGo 的 Go 原生控件，以及连接同一 daemon 的 Ghostty 终端。界面支持工作区和 Agent 管理、带辅助终端的 Focus 视图，以及包含定向授权和拓扑模板的空间 Board。
+
+```sh
+make desktop-dev            # 启动原生应用的开发模式
+make desktop                # 构建并临时签名 macOS 应用，不生成 DMG
+open desktop-mygo/build/darwin-arm64/wtable.app
+```
+
+也可以使用明确的原生命令 `make desktop-mygo` 和 `make desktop-mygo-dev`。产物目录取决于构建机器的架构，Intel Mac 使用 `darwin-amd64`。应用以 `CGO_ENABLED=0` 构建，无需 Node.js 或前端构建。关闭窗口只会断开界面，daemon 中的 Agent 继续运行。同一 `WTABLE_HOME` 下，打开桌面应用前需要先退出已连接的 TUI。详细说明见[桌面构建与验证](desktop-mygo/README.md)。
+
+Wails v3 客户端单独保留在 `pluto/feat/wails3` 分支。需要对比时使用该分支的工作区；同时打开两个客户端时，分别设置独立的 `WTABLE_HOME`。两版的布局和模板各自保存。
 
 ## 工作区
 

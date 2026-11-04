@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"wtable/internal/config"
@@ -19,17 +19,6 @@ type Bootstrap struct {
 	Workspace string         `json:"workspace"`
 	Snapshot  model.Snapshot `json:"snapshot"`
 	Home      string         `json:"home"`
-}
-
-type TerminalChunk struct {
-	Data   string `json:"data"`
-	Cursor uint64 `json:"cursor"`
-}
-
-type TerminalAttach struct {
-	History  string `json:"history"`
-	Snapshot string `json:"snapshot"`
-	Cursor   uint64 `json:"cursor"`
 }
 
 type SpawnPaneRequest struct {
@@ -53,9 +42,12 @@ type UpdatePaneRequest struct {
 }
 
 type App struct {
+	mu         sync.RWMutex
+	cancel     context.CancelFunc
+	terminals  map[*NativeTerminal]struct{}
+	closing    bool
 	ctx        context.Context
 	control    *rpc.Client
-	stream     *rpc.Client
 	paths      config.Paths
 	workspace  string
 	startupErr error
@@ -66,13 +58,25 @@ func NewApp() *App {
 }
 
 func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-	a.startupErr = a.connect(ctx)
+	a.ctx, a.cancel = context.WithCancel(ctx)
+	a.terminals = make(map[*NativeTerminal]struct{})
+	a.startupErr = a.connect(a.ctx)
 }
 
 func (a *App) shutdown(context.Context) {
-	if a.stream != nil {
-		_ = a.stream.Close()
+	a.mu.Lock()
+	a.closing = true
+	terms := make([]*NativeTerminal, 0, len(a.terminals))
+	for t := range a.terminals {
+		terms = append(terms, t)
+	}
+	a.mu.Unlock()
+	// Stop readers and input workers before releasing the single UI writer.
+	if a.cancel != nil {
+		a.cancel()
+	}
+	for _, t := range terms {
+		_ = t.Close()
 	}
 	if a.control != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -80,6 +84,18 @@ func (a *App) shutdown(context.Context) {
 		cancel()
 		_ = a.control.Close()
 	}
+}
+
+func (a *App) currentWorkspace() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.workspace
+}
+
+func (a *App) setWorkspace(workspace string) {
+	a.mu.Lock()
+	a.workspace = workspace
+	a.mu.Unlock()
 }
 
 func (a *App) connect(ctx context.Context) error {
@@ -98,19 +114,12 @@ func (a *App) connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	stream, err := rpc.Dial(ctx, paths.Socket, token)
-	if err != nil {
-		_ = control.Close()
-		return err
-	}
 	if err = control.Call(ctx, "ui.attach", nil, nil); err != nil {
-		_ = stream.Close()
 		_ = control.Close()
 		return fmt.Errorf("接入工作台失败：%w", err)
 	}
 	a.paths = paths
 	a.control = control
-	a.stream = stream
 	return nil
 }
 
@@ -129,7 +138,7 @@ func (a *App) Bootstrap() (Bootstrap, error) {
 	if err != nil {
 		return Bootstrap{}, err
 	}
-	a.workspace = workspace
+	a.setWorkspace(workspace)
 	return Bootstrap{Workspace: workspace, Snapshot: snapshot, Home: a.paths.Home}, nil
 }
 
@@ -163,13 +172,13 @@ func (a *App) GetSnapshot(workspace string) (model.Snapshot, error) {
 		return model.Snapshot{}, a.startupErr
 	}
 	if workspace == "" {
-		workspace = a.workspace
+		workspace = a.currentWorkspace()
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
 	defer cancel()
 	snapshot, err := a.snapshot(ctx, workspace)
 	if err == nil {
-		a.workspace = workspace
+		a.setWorkspace(workspace)
 	}
 	return snapshot, err
 }
@@ -221,7 +230,7 @@ func (a *App) OpenWorkspace(path string) (model.Snapshot, error) {
 	if err := a.control.Call(ctx, "workspace.open", map[string]string{"path": path}, nil); err != nil {
 		return model.Snapshot{}, err
 	}
-	a.workspace = path
+	a.setWorkspace(path)
 	return a.snapshot(ctx, path)
 }
 
@@ -252,12 +261,12 @@ func (a *App) SpawnPane(args SpawnPaneRequest) (model.Pane, error) {
 	if a.startupErr != nil {
 		return model.Pane{}, a.startupErr
 	}
-	if a.workspace == "" {
+	if a.currentWorkspace() == "" {
 		return model.Pane{}, errors.New("请先选择工作区")
 	}
 	workspace := args.Workspace
 	if workspace == "" {
-		workspace = a.workspace
+		workspace = a.currentWorkspace()
 	}
 	kind := args.Kind
 	if kind == "" {
@@ -300,7 +309,7 @@ func (a *App) UpdatePane(args UpdatePaneRequest) (model.Pane, error) {
 	}
 	workspace := args.Workspace
 	if workspace == "" {
-		workspace = a.workspace
+		workspace = a.currentWorkspace()
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
 	defer cancel()
@@ -323,7 +332,7 @@ func (a *App) RemovePane(id string) error {
 	defer cancel()
 	return a.control.Call(ctx, "pane.remove", map[string]string{
 		"id":        id,
-		"workspace": a.workspace,
+		"workspace": a.currentWorkspace(),
 	}, nil)
 }
 
@@ -345,7 +354,7 @@ func (a *App) edge(method, from, to string) (model.Edge, error) {
 	err := a.control.Call(ctx, method, map[string]string{
 		"from":      from,
 		"to":        to,
-		"workspace": a.workspace,
+		"workspace": a.currentWorkspace(),
 	}, &edge)
 	return edge, err
 }
@@ -354,7 +363,8 @@ func (a *App) CreateShell(name string) (model.Pane, error) {
 	if a.startupErr != nil {
 		return model.Pane{}, a.startupErr
 	}
-	if a.workspace == "" {
+	workspace := a.currentWorkspace()
+	if workspace == "" {
 		return model.Pane{}, errors.New("请先选择工作区")
 	}
 	if name == "" {
@@ -366,8 +376,8 @@ func (a *App) CreateShell(name string) (model.Pane, error) {
 	err := a.control.Call(ctx, "pane.spawn", model.SpawnParams{
 		Name:      name,
 		Backend:   "pty",
-		Cwd:       a.workspace,
-		Workspace: a.workspace,
+		Cwd:       workspace,
+		Workspace: workspace,
 		Cols:      120,
 		Rows:      32,
 	}, &pane)
@@ -377,79 +387,3 @@ func (a *App) CreateShell(name string) (model.Pane, error) {
 	_ = a.control.Call(ctx, "ui.focus", map[string]string{"id": pane.ID}, nil)
 	return pane, nil
 }
-
-func (a *App) SendInput(id, data string) error {
-	if a.startupErr != nil {
-		return a.startupErr
-	}
-	if id == "" || data == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
-	defer cancel()
-	return a.control.Call(ctx, "pane.input", map[string]string{
-		"id": id, "workspace": a.workspace, "data": data,
-	}, nil)
-}
-
-func (a *App) ResizeTerminal(id string, cols, rows int) error {
-	if a.startupErr != nil {
-		return a.startupErr
-	}
-	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
-	defer cancel()
-	return a.control.Call(ctx, "pane.resize", map[string]any{
-		"id": id, "workspace": a.workspace, "cols": cols, "rows": rows,
-	}, nil)
-}
-
-func (a *App) AttachTerminal(id string) (TerminalAttach, error) {
-	if a.startupErr != nil {
-		return TerminalAttach{}, a.startupErr
-	}
-	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
-	defer cancel()
-	var attachment struct {
-		History  []byte `json:"history"`
-		Snapshot []byte `json:"snapshot"`
-		Cursor   uint64 `json:"cursor"`
-	}
-	err := a.control.Call(ctx, "pane.attach", map[string]string{
-		"id": id, "workspace": a.workspace,
-	}, &attachment)
-	if err != nil {
-		return TerminalAttach{}, err
-	}
-	return TerminalAttach{
-		History:  base64.StdEncoding.EncodeToString(attachment.History),
-		Snapshot: base64.StdEncoding.EncodeToString(attachment.Snapshot),
-		Cursor:   attachment.Cursor,
-	}, nil
-}
-
-func (a *App) ReadTerminal(id string, cursor uint64) (TerminalChunk, error) {
-	if a.startupErr != nil {
-		return TerminalChunk{}, a.startupErr
-	}
-	if id == "" {
-		return TerminalChunk{Cursor: cursor}, nil
-	}
-	ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
-	defer cancel()
-	var output struct {
-		Data   []byte `json:"data"`
-		Cursor uint64 `json:"cursor"`
-	}
-	err := a.stream.Call(ctx, "pane.output", map[string]any{
-		"id": id, "workspace": a.workspace, "cursor": cursor, "max_bytes": outputChunkSize, "wait_ms": 650,
-	}, &output)
-	if err != nil {
-		return TerminalChunk{}, err
-	}
-	return TerminalChunk{
-		Data:   base64.StdEncoding.EncodeToString(output.Data),
-		Cursor: output.Cursor,
-	}, nil
-}
-
-const outputChunkSize = 64 << 10

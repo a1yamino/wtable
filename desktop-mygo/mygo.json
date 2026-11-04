@@ -1,0 +1,17 @@
+{
+  "name": "wtable",
+  "slug": "wtable",
+  "identifier": "dev.wtable.desktop",
+  "version": "0.5.0",
+  "main": ".",
+  "out": "build",
+  "icon": "resources/icon.png",
+  "macos": {
+    "minimumSystemVersion": "13.0"
+  },
+  "linux": {
+    "webview": false,
+    "comment": "A native terminal workbench for coding agents",
+    "categories": ["Development", "Utility"]
+  }
+}

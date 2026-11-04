@@ -10,7 +10,7 @@ This MVP runs terminal CLIs side by side through PTYs, routes tasks through expl
 
 ## Getting started
 
-Requires Go 1.27 or later. Git features require a local Git installation. Agents use their own installed executables and login configurations.
+Requires Go 1.27.3 or later. Git features require a local Git installation. Agents use their own installed executables and login configurations.
 
 Install the command once, then run it from any directory:
 
@@ -32,7 +32,31 @@ export WTABLE_HOME="$PWD/.dev/local"
 wtable
 ```
 
-Use a short absolute path for `WTABLE_HOME` to stay within the macOS Unix socket path limit. Each state directory supports one daemon and one writable TUI client.
+Use a short absolute path for `WTABLE_HOME` to stay within the macOS Unix socket path limit. Each state directory supports one daemon and one writable interface, either the TUI or the desktop app.
+
+## Native desktop
+
+The desktop app uses MyGo's Go UI toolkit and a Ghostty terminal connected to
+the same daemon. It includes workspace and Agent management, a Focus view with
+an auxiliary terminal, and a spatial Board with directional authorization and
+reusable topology templates.
+
+```sh
+make desktop-dev            # run the native app during development
+make desktop                # build and ad-hoc sign the macOS app, without a DMG
+open desktop-mygo/build/darwin-arm64/wtable.app
+```
+
+`make desktop-mygo` and `make desktop-mygo-dev` are the explicit native targets.
+The output directory follows the build machine's architecture (`darwin-amd64`
+on an Intel Mac). Go builds the app with `CGO_ENABLED=0`; Node.js and a frontend
+build are not required. Closing the window detaches the interface and keeps the
+daemon's agents running. Exit an attached TUI before opening the desktop app
+against the same `WTABLE_HOME`. See [desktop setup and validation](desktop-mygo/README.md).
+
+The Wails v3 client is preserved separately on branch `pluto/feat/wails3`.
+Use its checkout to compare clients, with separate `WTABLE_HOME` directories
+when both are open. Their layouts and templates are independent.
 
 ## Workspaces
 
