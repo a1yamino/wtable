@@ -13,6 +13,8 @@ import (
 )
 
 func (w *Workbench) view(c *ui.Context) {
+	defer w.releaseRetiredTerminals(c)
+	defer w.reconcileTerminals()
 	c.SetTheme(desktopTheme())
 	if !w.ready {
 		w.launchView(c)
@@ -45,6 +47,13 @@ func (w *Workbench) view(c *ui.Context) {
 	}
 	w.confirmView(c.Key("confirmation"))
 	w.statusView(c.Key("notifications"))
+	// A drawer may dismiss after the terminal was built in this frame. Request
+	// one more frame only once its target is ready to consume the focus request.
+	if w.forms.Kind == "" && !w.forms.ConfirmOpen && w.pendingTerminalFocus != "" {
+		if slot := w.terminals[w.pendingTerminalFocus]; slot != nil && slot.terminal != nil {
+			c.After(0)
+		}
+	}
 }
 
 func (w *Workbench) launchView(c *ui.Context) {
@@ -294,26 +303,20 @@ func statusDot(c *ui.Context, pane model.Pane) {
 
 func (w *Workbench) focusView(c *ui.Context) {
 	state := w.workspaceUI()
-	pane, ok := w.pane(state.FocusID)
-	if !ok || pane.Workspace != w.active {
-		panes := w.panes()
-		if len(panes) == 0 {
-			ui.Column(c).Fill().AlignItems(ui.Center).Justify(ui.Center).Gap(12).Children(func() {
-				ui.Icon(c, iconTerminal).Size(34, 34).TextColor(deskFaint)
-				ui.Text(c, "工作区已就绪").FontSize(20).Bold()
-				ui.Text(c, "添加 Agent 开始工作，或使用已有拓扑模板。").FontSize(13).TextColor(deskMuted)
-				ui.Row(c).Gap(8).Margin(6, 0).Children(func() {
-					quietButton(c, "新增 Agent", iconPlus).OnClick(func() { w.openAgent("") })
-					quietButton(c, "拓扑模板", iconTemplate).OnClick(w.openTemplates)
-				})
-				ui.Text(c, "⌘1 Focus   ·   ⌘2 Board   ·   ⌘K 搜索").FontSize(11).TextColor(deskFaint)
+	pane, dock, hasPane, hasDock := w.focusPanes()
+	if !hasPane {
+		ui.Column(c).Fill().AlignItems(ui.Center).Justify(ui.Center).Gap(12).Children(func() {
+			ui.Icon(c, iconTerminal).Size(34, 34).TextColor(deskFaint)
+			ui.Text(c, "工作区已就绪").FontSize(20).Bold()
+			ui.Text(c, "添加 Agent 开始工作，或使用已有拓扑模板。").FontSize(13).TextColor(deskMuted)
+			ui.Row(c).Gap(8).Margin(6, 0).Children(func() {
+				quietButton(c, "新增 Agent", iconPlus).OnClick(func() { w.openAgent("") })
+				quietButton(c, "拓扑模板", iconTemplate).OnClick(w.openTemplates)
 			})
-			return
-		}
-		pane = panes[0]
+			ui.Text(c, "⌘1 Focus   ·   ⌘2 Board   ·   ⌘K 搜索").FontSize(11).TextColor(deskFaint)
+		})
+		return
 	}
-	dock, hasDock := w.pane(state.DockID)
-	hasDock = hasDock && dock.ID != pane.ID && dock.Workspace == w.active
 	ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
 		ui.Column(c.Key("main-" + pane.ID)).Grow(1).MinWidth(0).Children(func() {
 			w.focusTerminalHeader(c.Key("heading"), pane, false)

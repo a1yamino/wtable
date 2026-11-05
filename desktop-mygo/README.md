@@ -49,11 +49,25 @@ The desktop UI currently supports:
 - locally saved global topology templates with Board preview and overrides
 - live PTY output, input, resize, and automatic workspace refresh
 
-Each terminal has an independent output connection and a fixed pane/workspace
-identity. Input and resize share the connection holding `ui.attach`. A resize
+Each open terminal has an independent output connection and a fixed pane/workspace
+identity. Focus keeps its main and auxiliary terminals; Board keeps its expanded
+nodes. Closing an auxiliary view, collapsing a node, switching views, or opening
+a template preview releases terminal instances that are no longer displayed.
+The daemon's processes keep running, and reopening a terminal restores its
+history and screen from the daemon.
+
+Input and resize share the connection holding `ui.attach`. A resize
 is followed by an atomic terminal attachment at the new grid size; the view
 replays history and the authoritative screen before resuming its byte cursor.
 Closing a terminal connection ends its subscription without stopping the pane.
+
+MyGo v0.7.4 releases view-owned native input helpers when a closed terminal's
+view builds again. The client therefore queues terminals only after `Close`
+finishes and consumes them in a hidden UI cleanup pass. This pass takes no
+layout space or input, and does not keep focus handles for discarded terminals.
+If the window is occluded, cleanup waits for its next build; active connections
+are already closed. Closing the application's only window ends the process,
+which also releases any final native resources awaiting a cleanup frame.
 
 Desktop preferences and global templates are saved atomically in
 `$WTABLE_HOME/desktop.json` (or the default state directory). This is a new

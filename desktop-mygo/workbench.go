@@ -41,32 +41,82 @@ type Workbench struct {
 	forms      formState
 	board      boardState
 
-	terminals      map[string]*terminalSlot
-	lastTerminalID string
-	saves          chan []byte
+	terminals            map[string]*terminalSlot
+	retiredTerminals     terminalRetirements
+	lastTerminalID       string
+	pendingTerminalFocus string
+	saves                chan []byte
 }
 
 type terminalSlot struct {
 	terminal *NativeTerminal
 	cancel   context.CancelFunc
 	err      error
-	focus    ui.Handle
 }
 
 func (w *Workbench) restoreTerminalFocus() {
-	if w.preview != nil {
-		return
+	w.pendingTerminalFocus = ""
+	if id := w.lastTerminalID; w.visibleTerminalIDs()[id] {
+		w.pendingTerminalFocus = id
 	}
-	id, state := w.lastTerminalID, w.workspaceUI()
-	if state.Mode == "board" {
-		if !state.Layouts[id].Expanded {
-			return
+}
+
+// focusPanes is shared by rendering and terminal ownership, including the
+// first-pane fallback used before a valid focus has been restored.
+func (w *Workbench) focusPanes() (pane, dock model.Pane, hasPane, hasDock bool) {
+	state := w.workspaceUI()
+	pane, hasPane = w.pane(state.FocusID)
+	if !hasPane {
+		if panes := w.panes(); len(panes) > 0 {
+			pane, hasPane = panes[0], true
 		}
-	} else if id != state.FocusID && id != state.DockID {
+	}
+	dock, hasDock = w.pane(state.DockID)
+	hasDock = hasPane && hasDock && dock.ID != pane.ID
+	return
+}
+
+func (w *Workbench) visibleTerminalIDs() map[string]bool {
+	visible := make(map[string]bool)
+	if !w.ready || w.preview != nil {
+		return visible
+	}
+	state := w.workspaceUI()
+	if state.Mode == "board" {
+		for _, pane := range w.panes() {
+			if pane.Backend == "pty" && state.Layouts[pane.ID].Expanded {
+				visible[pane.ID] = true
+			}
+		}
+		return visible
+	}
+	pane, dock, hasPane, hasDock := w.focusPanes()
+	if hasPane && pane.Backend == "pty" {
+		visible[pane.ID] = true
+	}
+	if hasDock && dock.Backend == "pty" {
+		visible[dock.ID] = true
+	}
+	return visible
+}
+
+func (w *Workbench) removeTerminalSlot(id string, slot *terminalSlot) {
+	if w.terminals[id] != slot {
 		return
 	}
-	if slot := w.terminals[id]; slot != nil && slot.terminal != nil {
-		slot.focus.Focus()
+	delete(w.terminals, id)
+	slot.cancel()
+}
+
+func (w *Workbench) reconcileTerminals() {
+	visible := w.visibleTerminalIDs()
+	for id, slot := range w.terminals {
+		if !visible[id] {
+			w.removeTerminalSlot(id, slot)
+		}
+	}
+	if !visible[w.pendingTerminalFocus] {
+		w.pendingTerminalFocus = ""
 	}
 }
 
@@ -288,12 +338,7 @@ func (w *Workbench) acceptSnapshot(snapshot model.Snapshot) {
 	if _, ok := w.pane(state.DockID); !ok || state.DockID == state.FocusID {
 		state.DockID = ""
 	}
-	for id, slot := range w.terminals {
-		if _, ok := w.pane(id); !ok {
-			slot.cancel()
-			delete(w.terminals, id)
-		}
-	}
+	w.reconcileTerminals()
 }
 
 // Commands capture their arguments on the UI thread and execute serially.
@@ -392,9 +437,9 @@ func (w *Workbench) switchWorkspace(path string) {
 
 func (w *Workbench) changeWorkspace(path string) {
 	for id, slot := range w.terminals {
-		slot.cancel()
-		delete(w.terminals, id)
+		w.removeTerminalSlot(id, slot)
 	}
+	w.pendingTerminalFocus = ""
 	w.active, w.preview = path, nil
 	w.board = boardState{}
 	w.closeForms()
@@ -624,11 +669,21 @@ func (w *Workbench) terminalView(c *ui.Context, pane model.Pane, autoFocus bool)
 		w.background(func() {
 			term, err := w.service.OpenTerminal(ctx, pane)
 			if err != nil {
-				w.post(func() { slot.err = err })
+				w.post(func() {
+					if w.terminals[pane.ID] == slot && ctx.Err() == nil {
+						slot.err = err
+					}
+				})
 				return
 			}
-			defer term.Close()
-			w.post(func() { slot.terminal = term })
+			defer w.closeTerminal(term)
+			w.post(func() {
+				if w.terminals[pane.ID] != slot || ctx.Err() != nil || !w.visibleTerminalIDs()[pane.ID] {
+					cancel()
+					return
+				}
+				slot.terminal = term
+			})
 			<-ctx.Done()
 		})
 	}
@@ -637,8 +692,7 @@ func (w *Workbench) terminalView(c *ui.Context, pane model.Pane, autoFocus bool)
 			ui.Text(c, "终端连接失败").Bold()
 			ui.Text(c, slot.err.Error()).Wrap()
 			ui.Button(c, "重新连接").OnClick(func() {
-				slot.cancel()
-				delete(w.terminals, pane.ID)
+				w.removeTerminalSlot(pane.ID, slot)
 			})
 		})
 		return
@@ -652,17 +706,20 @@ func (w *Workbench) terminalView(c *ui.Context, pane model.Pane, autoFocus bool)
 			ui.Row(c).Gap(8).Padding(6).Children(func() {
 				ui.Text(c, "终端连接中断："+err.Error()).Grow(1).FontSize(11).Wrap()
 				ui.Button(c, "重连终端").OnClick(func() {
-					slot.cancel()
-					delete(w.terminals, pane.ID)
+					w.removeTerminalSlot(pane.ID, slot)
 				})
 			})
 		}
-		element := ghostty.View(c, slot.terminal.Terminal).Fill().Bind(&slot.focus)
+		element := ghostty.View(c, slot.terminal.Terminal).Fill()
 		if element.Focused() {
 			w.lastTerminalID = pane.ID
 		}
 		if autoFocus {
 			element.AutoFocus()
+		}
+		if w.pendingTerminalFocus == pane.ID && w.forms.Kind == "" && !w.forms.ConfirmOpen {
+			element.Focus()
+			w.pendingTerminalFocus = ""
 		}
 	})
 }

@@ -20,14 +20,34 @@ from smoke import RPC, screen_text, wait_until
 
 
 class Automation:
-    def __init__(self, path):
+    def __init__(self, path, pid=None):
         self.sock = socket.socket(socket.AF_UNIX)
         self.sock.settimeout(5)
         self.sock.connect(str(path))
         self.file = self.sock.makefile('rb')
         self.seq = 0
+        self.pid = pid
+
+    def ensure_foreground(self):
+        if self.pid is None:
+            return
+        if any(w.get('focused') for w in self.call('windows')['windows']):
+            return
+        # Native keyboard events require a key window. Activate only this
+        # test process through AppKit; do not synthesize a SurfaceFocus event.
+        script = '''ObjC.import('AppKit');
+function run(argv) {
+    const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(argv[0]));
+    if (!app.activateWithOptions(2)) throw new Error('Cannot activate the test application');
+}'''
+        subprocess.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, str(self.pid)],
+                       check=True, capture_output=True, text=True, timeout=5)
+        wait_until(lambda: any(w.get('focused') for w in self.call('windows')['windows']),
+                   'test window foreground', timeout=5)
 
     def call(self, method, **params):
+        if method == 'input' or method == 'act' and params.get('action') == 'focus':
+            self.ensure_foreground()
         self.seq += 1
         request = {'id': self.seq, 'method': method, 'params': params}
         self.sock.sendall((json.dumps(request, ensure_ascii=False) + '\n').encode())
@@ -126,7 +146,7 @@ def run(args):
         proc = subprocess.Popen([str(binary)], env=env, cwd=str(ws), stdout=app_log, stderr=subprocess.STDOUT)
         wait_until(lambda: sock.exists() or proc.poll() is not None, 'automation socket', timeout=15)
         assert proc.poll() is None, 'app exited before automation started'
-        ui = Automation(sock)
+        ui = Automation(sock, proc.pid)
         wait_until(lambda: ui.call('windows')['windows'], 'native window', timeout=15)
         wait_until(lambda: any(n.get('label') == '新增 Agent' for n in ui.nodes()), 'workbench ready', timeout=20)
 
